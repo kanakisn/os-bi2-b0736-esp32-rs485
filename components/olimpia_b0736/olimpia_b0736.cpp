@@ -1,0 +1,478 @@
+#include "olimpia_b0736.h"
+
+#include <cmath>
+#include <cstdio>
+
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
+#include "esphome/core/version.h"
+
+namespace esphome {
+namespace olimpia_b0736 {
+
+static const char *const TAG = "olimpia_b0736";
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+uint8_t OlimpiaB0736::lrc_(const std::vector<uint8_t> &data) {
+  uint8_t sum = 0;
+  for (uint8_t b : data)
+    sum = static_cast<uint8_t>(sum + b);
+  return static_cast<uint8_t>(-static_cast<int8_t>(sum));
+}
+
+bool OlimpiaB0736::hex_to_bytes_(const std::string &s, std::vector<uint8_t> &out) {
+  if (s.size() < 2 || (s.size() % 2) != 0)
+    return false;
+  out.clear();
+  for (size_t i = 0; i < s.size(); i += 2) {
+    char buf[3] = {s[i], s[i + 1], 0};
+    char *end = nullptr;
+    long v = strtol(buf, &end, 16);
+    if (end != buf + 2)
+      return false;
+    out.push_back(static_cast<uint8_t>(v));
+  }
+  return true;
+}
+
+static float decode_setpoint(uint16_t raw) { return 15.5f + 0.5f * static_cast<float>(raw); }
+
+static uint16_t encode_setpoint(float degc) {
+  int v = static_cast<int>(lroundf((degc - 15.5f) * 2.0f));
+  if (v < 1)
+    v = 1;  // 16.0 degC
+  if (v > 25)
+    v = 25;  // 28.0 degC
+  return static_cast<uint16_t>(v);
+}
+
+// ---------------------------------------------------------------------------
+// lifecycle
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::setup() {
+  this->mode = climate::CLIMATE_MODE_OFF;
+  this->fan_mode = climate::CLIMATE_FAN_AUTO;
+  this->target_temperature = NAN;
+  this->current_temperature = NAN;
+  this->action = climate::CLIMATE_ACTION_OFF;
+}
+
+void OlimpiaB0736::dump_config() {
+  ESP_LOGCONFIG(TAG, "Olimpia B0736 supervisor:");
+  ESP_LOGCONFIG(TAG, "  Slave address: %u", this->address_);
+  ESP_LOGCONFIG(TAG, "  Reply timeout: %u ms", this->timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Max retries: %u", this->max_retries_);
+  this->check_uart_settings(9600, 1, uart::UART_CONFIG_PARITY_EVEN, 7);
+}
+
+// ---------------------------------------------------------------------------
+// polling
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::update() {
+  // While the link is down, do not queue the whole poll set: each dead
+  // transaction costs timeout x retries, which would outrun update_interval
+  // and build a backlog. Just knock on the door.
+  if (!this->session_ok_) {
+    this->queue_.clear();
+    this->enqueue_(0x03, REG_IDENT, 1);
+    return;
+  }
+
+  // Do not pile up work if the bus is slow.
+  if (this->queue_.size() > 8) {
+    ESP_LOGW(TAG, "Queue backed up (%u), skipping poll", (unsigned) this->queue_.size());
+    return;
+  }
+
+  this->enqueue_(0x03, REG_ROOM_TEMP, 1);
+  this->enqueue_(0x03, REG_CONTROL, 1);
+  this->enqueue_(0x03, REG_SETPOINT, 1);
+  this->enqueue_(0x03, REG_MODE, 1);
+  this->enqueue_(0x03, REG_STATUS, 1);
+  this->enqueue_(0x03, REG_FAULT, 1);
+}
+
+void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val) {
+  this->queue_.push_back(Txn{fn, reg, val});
+}
+
+// ---------------------------------------------------------------------------
+// transmit
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::send_frame_(const Txn &t) {
+  std::vector<uint8_t> payload = {
+      this->address_,
+      t.fn,
+      static_cast<uint8_t>(t.reg >> 8),
+      static_cast<uint8_t>(t.reg & 0xFF),
+      static_cast<uint8_t>(t.val >> 8),
+      static_cast<uint8_t>(t.val & 0xFF),
+  };
+  uint8_t lrc = lrc_(payload);
+
+  std::string frame = ":";
+  char buf[4];
+  for (uint8_t b : payload) {
+    snprintf(buf, sizeof(buf), "%02X", b);
+    frame += buf;
+  }
+  snprintf(buf, sizeof(buf), "%02X", lrc);
+  frame += buf;
+  frame += "\r\n";
+
+  ESP_LOGV(TAG, "TX %s", frame.substr(0, frame.size() - 2).c_str());
+  this->write_str(frame.c_str());
+}
+
+void OlimpiaB0736::send_next_() {
+  if (this->queue_.empty())
+    return;
+  this->current_ = this->queue_.front();
+  this->queue_.erase(this->queue_.begin());
+  this->retries_ = 0;
+  this->rx_.clear();
+  this->collecting_ = false;
+  this->send_frame_(this->current_);
+  this->state_ = STATE_WAITING;
+  this->sent_at_ = millis();
+}
+
+// ---------------------------------------------------------------------------
+// receive
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::loop() {
+  while (this->available()) {
+    uint8_t c;
+    if (!this->read_byte(&c))
+      break;
+    if (c == ':') {
+      this->rx_.clear();
+      this->collecting_ = true;
+      continue;
+    }
+    if (!this->collecting_)
+      continue;
+    if (c == '\r')
+      continue;
+    if (c == '\n') {
+      this->collecting_ = false;
+      this->handle_frame_();
+      this->rx_.clear();
+      continue;
+    }
+    this->rx_.push_back(static_cast<char>(c));
+    if (this->rx_.size() > 64) {  // runaway, resynchronise
+      this->collecting_ = false;
+      this->rx_.clear();
+    }
+  }
+
+  if (this->state_ == STATE_WAITING && (millis() - this->sent_at_) > this->timeout_ms_)
+    this->on_timeout_();
+
+  if (this->state_ == STATE_IDLE)
+    this->send_next_();
+}
+
+void OlimpiaB0736::handle_frame_() {
+  if (this->state_ != STATE_WAITING)
+    return;
+
+  std::vector<uint8_t> b;
+  if (!hex_to_bytes_(this->rx_, b) || b.size() < 4) {
+    ESP_LOGW(TAG, "Malformed frame: %s", this->rx_.c_str());
+    return;
+  }
+
+  std::vector<uint8_t> body(b.begin(), b.end() - 1);
+  if (lrc_(body) != b.back()) {
+    ESP_LOGW(TAG, "LRC mismatch: %s", this->rx_.c_str());
+    return;
+  }
+  if (b[0] != this->address_)
+    return;  // not for us
+
+  this->consecutive_failures_ = 0;
+  if (!this->online_) {
+    this->online_ = true;
+#ifdef USE_BINARY_SENSOR
+    if (this->online_binary_sensor_ != nullptr)
+      this->online_binary_sensor_->publish_state(true);
+#endif
+    ESP_LOGI(TAG, "B0736 online");
+  }
+
+  const uint8_t fn = b[1];
+
+  if (fn & 0x80) {
+    ESP_LOGW(TAG, "Exception 0x%02X for reg %u", b.size() > 2 ? b[2] : 0, this->current_.reg);
+    this->state_ = STATE_IDLE;
+    return;
+  }
+
+  if (fn == 0x03 && b.size() >= 6) {
+    const uint8_t count = b[2];
+    if (count >= 2) {
+      uint16_t value = (static_cast<uint16_t>(b[3]) << 8) | b[4];
+      this->on_register_(this->current_.reg, value);
+    }
+  } else if (fn == 0x06) {
+    ESP_LOGD(TAG, "Wrote reg %u = %u", this->current_.reg, this->current_.val);
+    this->on_register_(this->current_.reg, this->current_.val);
+  }
+
+  this->state_ = STATE_IDLE;
+}
+
+void OlimpiaB0736::on_timeout_() {
+  if (this->retries_ < this->max_retries_) {
+    this->retries_++;
+    ESP_LOGD(TAG, "Timeout on reg %u, retry %u", this->current_.reg, this->retries_);
+    this->rx_.clear();
+    this->collecting_ = false;
+    this->send_frame_(this->current_);
+    this->sent_at_ = millis();
+    return;
+  }
+  ESP_LOGW(TAG, "No reply for reg %u after %u tries", this->current_.reg, this->max_retries_ + 1);
+  this->state_ = STATE_IDLE;
+  this->mark_offline_();
+}
+
+void OlimpiaB0736::mark_offline_() {
+  if (this->consecutive_failures_ < 255)
+    this->consecutive_failures_++;
+
+  // Three dead transactions in a row: assume the supervisor session has
+  // lapsed and re-open it on the next poll.
+  if (this->consecutive_failures_ >= 3) {
+    if (this->session_ok_ || this->online_)
+      ESP_LOGW(TAG, "Session lost, will re-handshake");
+    this->session_ok_ = false;
+    this->control_valid_ = false;
+    if (this->online_) {
+      this->online_ = false;
+#ifdef USE_BINARY_SENSOR
+      if (this->online_binary_sensor_ != nullptr)
+        this->online_binary_sensor_->publish_state(false);
+#endif
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// register decoding
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
+  switch (reg) {
+    case REG_IDENT:
+      ESP_LOGI(TAG, "Session open (ident = %u)", value);
+      this->session_ok_ = true;
+      break;
+
+    case REG_ROOM_TEMP: {
+      float t = static_cast<float>(value) * 0.1f;
+      this->current_temperature = t;
+#ifdef USE_SENSOR
+      if (this->room_temperature_sensor_ != nullptr)
+        this->room_temperature_sensor_->publish_state(t);
+#endif
+      break;
+    }
+
+    case REG_CONTROL:
+      this->control_reg_ = value;
+      this->control_valid_ = true;
+      if (this->control_pending_)
+        this->apply_pending_control_(value);
+      break;
+
+    case REG_SETPOINT:
+      this->setpoint_reg_ = value;
+      this->target_temperature = decode_setpoint(value);
+      break;
+
+    case REG_MODE:
+      this->mode_reg_ = value;
+      break;
+
+    case REG_STATUS:
+      this->status_reg_ = value;
+#ifdef USE_BINARY_SENSOR
+      if (this->chiller_binary_sensor_ != nullptr)
+        this->chiller_binary_sensor_->publish_state((value & STATUS_CHILLER) != 0);
+      if (this->boiler_binary_sensor_ != nullptr)
+        this->boiler_binary_sensor_->publish_state((value & STATUS_BOILER) != 0);
+#endif
+      break;
+
+    case REG_FAULT:
+      this->fault_reg_ = value;
+#ifdef USE_BINARY_SENSOR
+      if (this->fault_binary_sensor_ != nullptr)
+        this->fault_binary_sensor_->publish_state(value != 0);
+#endif
+      this->publish_all_();  // last register of the poll batch
+      break;
+
+    default:
+      break;
+  }
+}
+
+void OlimpiaB0736::publish_all_() {
+  const bool standby = (this->control_reg_ & CTRL_STANDBY) != 0;
+
+  if (standby) {
+    this->mode = climate::CLIMATE_MODE_OFF;
+  } else {
+    this->mode = (this->mode_reg_ == MODE_HEATING) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_COOL;
+  }
+
+  switch (this->control_reg_ & CTRL_FAN_MASK) {
+    case FAN_MIN:
+      this->fan_mode = climate::CLIMATE_FAN_LOW;
+      break;
+    case FAN_NIGHT:
+      this->fan_mode = climate::CLIMATE_FAN_QUIET;
+      break;
+    case FAN_MAX:
+      this->fan_mode = climate::CLIMATE_FAN_HIGH;
+      break;
+    default:
+      this->fan_mode = climate::CLIMATE_FAN_AUTO;
+      break;
+  }
+
+  if (standby) {
+    this->action = climate::CLIMATE_ACTION_OFF;
+  } else if ((this->status_reg_ & STATUS_CHILLER) != 0) {
+    this->action = climate::CLIMATE_ACTION_COOLING;
+  } else if ((this->status_reg_ & STATUS_BOILER) != 0) {
+    this->action = climate::CLIMATE_ACTION_HEATING;
+  } else {
+    this->action = climate::CLIMATE_ACTION_IDLE;
+  }
+
+  this->publish_state();
+}
+
+// ---------------------------------------------------------------------------
+// control
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::apply_pending_control_(uint16_t current) {
+  uint16_t next = static_cast<uint16_t>((current & ~this->ctrl_clear_mask_) | this->ctrl_set_mask_);
+  this->control_pending_ = false;
+  this->ctrl_set_mask_ = 0;
+  this->ctrl_clear_mask_ = 0;
+  if (next != current)
+    this->enqueue_(0x06, REG_CONTROL, next);
+}
+
+void OlimpiaB0736::control(const climate::ClimateCall &call) {
+  uint16_t set_mask = 0;
+  uint16_t clear_mask = 0;
+  bool touch_control = false;
+
+  if (call.get_mode().has_value()) {
+    const climate::ClimateMode m = *call.get_mode();
+    if (m == climate::CLIMATE_MODE_OFF) {
+      set_mask |= CTRL_STANDBY;
+    } else {
+      clear_mask |= CTRL_STANDBY;
+      const uint16_t want = (m == climate::CLIMATE_MODE_HEAT) ? MODE_HEATING : MODE_COOLING;
+      if (want != this->mode_reg_) {
+        this->enqueue_(0x06, REG_MODE, want);
+        this->mode_reg_ = want;
+      }
+    }
+    this->mode = m;
+    touch_control = true;
+  }
+
+  if (call.get_fan_mode().has_value()) {
+    uint16_t prg = FAN_AUTO;
+    switch (*call.get_fan_mode()) {
+      case climate::CLIMATE_FAN_LOW:
+        prg = FAN_MIN;
+        break;
+      case climate::CLIMATE_FAN_QUIET:
+        prg = FAN_NIGHT;
+        break;
+      case climate::CLIMATE_FAN_HIGH:
+        prg = FAN_MAX;
+        break;
+      default:
+        prg = FAN_AUTO;
+        break;
+    }
+    clear_mask |= CTRL_FAN_MASK;
+    set_mask |= prg;
+    this->fan_mode = *call.get_fan_mode();
+    touch_control = true;
+  }
+
+  if (call.get_target_temperature().has_value()) {
+    const float t = *call.get_target_temperature();
+    const uint16_t raw = encode_setpoint(t);
+    this->enqueue_(0x06, REG_SETPOINT, raw);
+    this->setpoint_reg_ = raw;
+    this->target_temperature = decode_setpoint(raw);
+  }
+
+  if (touch_control) {
+    // Read-modify-write: bits outside the fan and standby fields are not
+    // understood, so they must be preserved rather than overwritten.
+    this->ctrl_set_mask_ |= set_mask;
+    this->ctrl_clear_mask_ |= clear_mask;
+    if (this->control_valid_) {
+      this->apply_pending_control_(this->control_reg_);
+    } else {
+      this->control_pending_ = true;
+      this->enqueue_(0x03, REG_CONTROL, 1);
+    }
+  }
+
+  this->publish_state();
+}
+
+climate::ClimateTraits OlimpiaB0736::traits() {
+  auto traits = climate::ClimateTraits();
+  // ESPHome 2025.11 replaced the boolean set_supports_* accessors with a
+  // feature-flag bitmask; the old shims were removed in 2026.5.
+#if defined(ESPHOME_VERSION_CODE) && ESPHOME_VERSION_CODE >= VERSION_CODE(2025, 11, 0)
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_ACTION);
+#else
+  traits.set_supports_current_temperature(true);
+  traits.set_supports_action(true);
+#endif
+  traits.set_supported_modes({
+      climate::CLIMATE_MODE_OFF,
+      climate::CLIMATE_MODE_COOL,
+      climate::CLIMATE_MODE_HEAT,
+  });
+  traits.set_supported_fan_modes({
+      climate::CLIMATE_FAN_AUTO,
+      climate::CLIMATE_FAN_LOW,
+      climate::CLIMATE_FAN_QUIET,
+      climate::CLIMATE_FAN_HIGH,
+  });
+  traits.set_visual_min_temperature(16.0f);
+  traits.set_visual_max_temperature(28.0f);
+  traits.set_visual_target_temperature_step(0.5f);
+  traits.set_visual_current_temperature_step(0.1f);
+  return traits;
+}
+
+}  // namespace olimpia_b0736
+}  // namespace esphome

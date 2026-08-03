@@ -1,0 +1,79 @@
+esphome:
+  name: olimpia-sniffer
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Static IP: no DHCP lease changes, no mDNS dependency.
+  # Pick an address OUTSIDE your router's DHCP pool.
+  manual_ip:
+    static_ip: 192.168.0.110
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  use_address: 192.168.0.110
+  # Keeps the API connection stable; the ESP32 will not sleep its radio.
+  power_save_mode: none
+  # Rejoin rather than sulk if the AP disappears briefly.
+  reboot_timeout: 15min
+
+api:
+ota:
+  - platform: esphome
+
+# ---- T-CAN485 transceiver enables ----
+# All three driven HIGH. No inversion.
+switch:
+  - platform: gpio
+    name: "EN 5V"
+    id: en_5v
+    pin: GPIO16
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    name: "RS485 EN"
+    id: rs485_en
+    pin: GPIO17
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    name: "RS485 SE"
+    id: rs485_se
+    pin: GPIO19
+    restore_mode: ALWAYS_ON
+
+# ---- Listen-only UART ----
+# Modbus ASCII framing per RDE109: 9600, 7 data bits, even parity, 1 stop
+# NOT inverted - inverting makes the idle line read as continuous 0x00
+uart:
+  id: bus
+  rx_pin: GPIO21
+  tx_pin: GPIO22
+  baud_rate: 9600
+  data_bits: 7
+  parity: EVEN
+  stop_bits: 1
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      timeout: 20ms
+      bytes: 256
+    sequence:
+      - lambda: |-
+          std::string hex, txt;
+          char b[8];
+          for (auto c : bytes) {
+            sprintf(b, "%02X ", c);
+            hex += b;
+            char m = c & 0x7F;
+            txt += (m >= 32 && m < 127) ? m : '.';
+          }
+          ESP_LOGI("bus", "%8u ms  n=%2u  %s| %s",
+                   (unsigned) millis(), bytes.size(), hex.c_str(), txt.c_str());
