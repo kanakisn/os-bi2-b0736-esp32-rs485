@@ -321,6 +321,18 @@ void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
 
     case REG_STATUS:
       this->status_reg_ = value;
+      // Diagnostic: log reg 9 every poll with a full bit breakdown so the
+      // "cooling active" bit can be identified by watching which bit flips.
+      ESP_LOGD(TAG, "STATUS reg9 = 0x%04X  b15..b0 = %c%c%c%c %c%c%c%c %c%c%c%c %c%c%c%c",
+               value,
+               (value & 0x8000) ? '1' : '0', (value & 0x4000) ? '1' : '0',
+               (value & 0x2000) ? '1' : '0', (value & 0x1000) ? '1' : '0',
+               (value & 0x0800) ? '1' : '0', (value & 0x0400) ? '1' : '0',
+               (value & 0x0200) ? '1' : '0', (value & 0x0100) ? '1' : '0',
+               (value & 0x0080) ? '1' : '0', (value & 0x0040) ? '1' : '0',
+               (value & 0x0020) ? '1' : '0', (value & 0x0010) ? '1' : '0',
+               (value & 0x0008) ? '1' : '0', (value & 0x0004) ? '1' : '0',
+               (value & 0x0002) ? '1' : '0', (value & 0x0001) ? '1' : '0');
 #ifdef USE_BINARY_SENSOR
       if (this->chiller_binary_sensor_ != nullptr)
         this->chiller_binary_sensor_->publish_state((value & STATUS_CHILLER) != 0);
