@@ -24,7 +24,7 @@ static const uint16_t REG_ROOM_TEMP = 0;    // R   room temperature, x0.1 degC
 static const uint16_t REG_STATUS = 9;       // R   b14 EV1, b13 boiler, b12 chiller, b11 EV2
 static const uint16_t REG_FAULT = 105;      // R   0 = healthy
 static const uint16_t REG_IDENT = 199;      // R   constant 1200, read once per session
-static const uint16_t REG_CONTROL = 201;    // R/W b2..b0 fan, b7 standby
+static const uint16_t REG_CONTROL = 201;    // R/W b2-b0 fan (0 auto, 1 min, 2 night, 3 max), b7 standby
 static const uint16_t REG_SETPOINT = 231;   // R/W (degC - 15.5) * 2
 static const uint16_t REG_MODE = 233;       // R/W 3 = heating, 5 = cooling
 
@@ -55,6 +55,16 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
   void set_address(uint8_t address) { this->address_ = address; }
   void set_timeout(uint32_t ms) { this->timeout_ms_ = ms; }
   void set_max_retries(uint8_t n) { this->max_retries_ = n; }
+
+  // --- exploration services, exposed to Home Assistant ---------------------
+  // Read one register and log the result.
+  void read_register(int reg);
+  // Write one register. No read-modify-write: the value is used verbatim.
+  void write_register(int reg, int value);
+  // Read a contiguous span and log every answer. Use for mapping unknowns.
+  void scan_registers(int start, int count);
+  // Set or clear a single bit of the control word, preserving everything else.
+  void set_control_bit(int bit, bool value);
 
 #ifdef USE_SENSOR
   void set_room_temperature_sensor(sensor::Sensor *s) { this->room_temperature_sensor_ = s; }
@@ -122,6 +132,9 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
   bool control_pending_{false};
   uint16_t ctrl_set_mask_{0};
   uint16_t ctrl_clear_mask_{0};
+
+  // registers requested by hand, so their replies get logged prominently
+  std::vector<uint16_t> manual_reads_;
 
 #ifdef USE_SENSOR
   sensor::Sensor *room_temperature_sensor_{nullptr};

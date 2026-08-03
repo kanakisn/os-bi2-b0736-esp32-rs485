@@ -8,7 +8,7 @@ esp32:
 
 logger:
   # DEBUG is required for the uart debug block below to print anything.
-  level: INFO
+  level: DEBUG
 
 wifi:
   ssid: !secret wifi_ssid
@@ -30,6 +30,35 @@ wifi:
   reboot_timeout: 15min
 
 api:
+  # Exploration services, callable from Developer Tools -> Actions.
+  services:
+    - service: read_register
+      variables:
+        reg: int
+      then:
+        - lambda: id(fancoils).read_register(reg);
+
+    - service: write_register
+      variables:
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoils).write_register(reg, value);
+
+    - service: scan_registers
+      variables:
+        start: int
+        count: int
+      then:
+        - lambda: id(fancoils).scan_registers(start, count);
+
+    - service: set_control_bit
+      variables:
+        bit: int
+        value: bool
+      then:
+        - lambda: id(fancoils).set_control_bit(bit, value);
+
 ota:
   - platform: esphome
 
@@ -75,6 +104,7 @@ uart:
 climate:
   - platform: olimpia_b0736
     name: "Fan coils"
+    id: fancoils
     uart_id: bus
     address: 1
     update_interval: 5s

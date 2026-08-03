@@ -272,6 +272,21 @@ void OlimpiaB0736::mark_offline_() {
 // ---------------------------------------------------------------------------
 
 void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
+  // If this register was asked for by hand, report it clearly.
+  for (auto it = this->manual_reads_.begin(); it != this->manual_reads_.end(); ++it) {
+    if (*it == reg) {
+      ESP_LOGI(TAG, "REG %u (0x%04X) = %u  0x%04X  %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s", reg, reg, value,
+               value, (value & 0x8000) ? "1" : "0", (value & 0x4000) ? "1" : "0",
+               (value & 0x2000) ? "1" : "0", (value & 0x1000) ? "1" : "0", (value & 0x0800) ? "1" : "0",
+               (value & 0x0400) ? "1" : "0", (value & 0x0200) ? "1" : "0", (value & 0x0100) ? "1" : "0",
+               (value & 0x0080) ? "1" : "0", (value & 0x0040) ? "1" : "0", (value & 0x0020) ? "1" : "0",
+               (value & 0x0010) ? "1" : "0", (value & 0x0008) ? "1" : "0", (value & 0x0004) ? "1" : "0",
+               (value & 0x0002) ? "1" : "0", (value & 0x0001) ? "1" : "0");
+      this->manual_reads_.erase(it);
+      break;
+    }
+  }
+
   switch (reg) {
     case REG_IDENT:
       ESP_LOGI(TAG, "Session open (ident = %u)", value);
@@ -443,6 +458,72 @@ void OlimpiaB0736::control(const climate::ClimateCall &call) {
   }
 
   this->publish_state();
+}
+
+// ---------------------------------------------------------------------------
+// exploration services
+// ---------------------------------------------------------------------------
+
+void OlimpiaB0736::read_register(int reg) {
+  if (reg < 0 || reg > 0xFFFF) {
+    ESP_LOGW(TAG, "read_register: %d out of range", reg);
+    return;
+  }
+  ESP_LOGI(TAG, "read_register(%d) queued", reg);
+  this->manual_reads_.push_back(static_cast<uint16_t>(reg));
+  this->enqueue_(0x03, static_cast<uint16_t>(reg), 1);
+}
+
+void OlimpiaB0736::write_register(int reg, int value) {
+  if (reg < 0 || reg > 0xFFFF || value < 0 || value > 0xFFFF) {
+    ESP_LOGW(TAG, "write_register: %d/%d out of range", reg, value);
+    return;
+  }
+  // Registers 200 and above live in EEPROM with limited write endurance.
+  if (reg >= 200 && reg <= 200) {
+    ESP_LOGW(TAG, "register %d is the slave address in EEPROM - refusing", reg);
+    return;
+  }
+  ESP_LOGI(TAG, "write_register(%d, %d = 0x%04X) queued", reg, value, value);
+  this->enqueue_(0x06, static_cast<uint16_t>(reg), static_cast<uint16_t>(value));
+  this->manual_reads_.push_back(static_cast<uint16_t>(reg));
+  this->enqueue_(0x03, static_cast<uint16_t>(reg), 1);  // read back
+}
+
+void OlimpiaB0736::scan_registers(int start, int count) {
+  if (count < 1)
+    count = 1;
+  if (count > 64) {
+    ESP_LOGW(TAG, "scan limited to 64 registers per call");
+    count = 64;
+  }
+  ESP_LOGI(TAG, "scanning registers %d..%d", start, start + count - 1);
+  for (int r = start; r < start + count; r++) {
+    if (r < 0 || r > 0xFFFF)
+      continue;
+    this->manual_reads_.push_back(static_cast<uint16_t>(r));
+    this->enqueue_(0x03, static_cast<uint16_t>(r), 1);
+  }
+}
+
+void OlimpiaB0736::set_control_bit(int bit, bool value) {
+  if (bit < 0 || bit > 15) {
+    ESP_LOGW(TAG, "set_control_bit: bit %d out of range", bit);
+    return;
+  }
+  const uint16_t mask = static_cast<uint16_t>(1u << bit);
+  ESP_LOGI(TAG, "control bit %d -> %s", bit, value ? "1" : "0");
+  if (value) {
+    this->ctrl_set_mask_ |= mask;
+  } else {
+    this->ctrl_clear_mask_ |= mask;
+  }
+  if (this->control_valid_) {
+    this->apply_pending_control_(this->control_reg_);
+  } else {
+    this->control_pending_ = true;
+    this->enqueue_(0x03, REG_CONTROL, 1);
+  }
 }
 
 climate::ClimateTraits OlimpiaB0736::traits() {
