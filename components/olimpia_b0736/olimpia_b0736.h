@@ -82,6 +82,7 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
 
   // --- transaction plumbing -------------------------------------------------
   struct Txn {
+    uint8_t addr;  // 0 = use the configured address
     uint8_t fn;
     uint16_t reg;
     uint16_t val;  // FC03: quantity, FC06: value to write
@@ -89,7 +90,7 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
 
   enum State : uint8_t { STATE_IDLE, STATE_WAITING };
 
-  void enqueue_(uint8_t fn, uint16_t reg, uint16_t val);
+  void enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr = 0);
   void send_next_();
   void send_frame_(const Txn &t);
   void handle_frame_();

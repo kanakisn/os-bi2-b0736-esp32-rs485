@@ -78,6 +78,10 @@ void OlimpiaB0736::update() {
   // transaction costs timeout x retries, which would outrun update_interval
   // and build a backlog. Just knock on the door.
   if (!this->session_ok_) {
+    // Knock with the IDENT read (reg 199) - the handshake that opens a session
+    // with the B0736. This is the exact request the working unit uses; the
+    // address sweep was removed because it never sent this and so never
+    // connected.
     this->queue_.clear();
     this->enqueue_(0x03, REG_IDENT, 1);
     return;
@@ -97,8 +101,8 @@ void OlimpiaB0736::update() {
   this->enqueue_(0x03, REG_FAULT, 1);
 }
 
-void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val) {
-  this->queue_.push_back(Txn{fn, reg, val});
+void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr) {
+  this->queue_.push_back(Txn{addr, fn, reg, val});
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +111,7 @@ void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val) {
 
 void OlimpiaB0736::send_frame_(const Txn &t) {
   std::vector<uint8_t> payload = {
-      this->address_,
+      t.addr != 0 ? t.addr : this->address_,
       t.fn,
       static_cast<uint8_t>(t.reg >> 8),
       static_cast<uint8_t>(t.reg & 0xFF),
@@ -196,8 +200,11 @@ void OlimpiaB0736::handle_frame_() {
     ESP_LOGW(TAG, "LRC mismatch: %s", this->rx_.c_str());
     return;
   }
-  if (b[0] != this->address_)
+  const uint8_t expect = this->current_.addr != 0 ? this->current_.addr : this->address_;
+  if (b[0] != expect)
     return;  // not for us
+  if (this->current_.addr != 0)
+    ESP_LOGI(TAG, "*** ADDRESS %u ANSWERED (reg %u) ***", b[0], this->current_.reg);
 
   this->consecutive_failures_ = 0;
   if (!this->online_) {
@@ -321,18 +328,6 @@ void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
 
     case REG_STATUS:
       this->status_reg_ = value;
-      // Diagnostic: log reg 9 every poll with a full bit breakdown so the
-      // "cooling active" bit can be identified by watching which bit flips.
-      ESP_LOGD(TAG, "STATUS reg9 = 0x%04X  b15..b0 = %c%c%c%c %c%c%c%c %c%c%c%c %c%c%c%c",
-               value,
-               (value & 0x8000) ? '1' : '0', (value & 0x4000) ? '1' : '0',
-               (value & 0x2000) ? '1' : '0', (value & 0x1000) ? '1' : '0',
-               (value & 0x0800) ? '1' : '0', (value & 0x0400) ? '1' : '0',
-               (value & 0x0200) ? '1' : '0', (value & 0x0100) ? '1' : '0',
-               (value & 0x0080) ? '1' : '0', (value & 0x0040) ? '1' : '0',
-               (value & 0x0020) ? '1' : '0', (value & 0x0010) ? '1' : '0',
-               (value & 0x0008) ? '1' : '0', (value & 0x0004) ? '1' : '0',
-               (value & 0x0002) ? '1' : '0', (value & 0x0001) ? '1' : '0');
 #ifdef USE_BINARY_SENSOR
       if (this->chiller_binary_sensor_ != nullptr)
         this->chiller_binary_sensor_->publish_state((value & STATUS_CHILLER) != 0);

@@ -10,3 +10,6 @@
 # Python
 __pycache__/
 *.pyc
+
+# JetBrains IDE
+/.idea/
