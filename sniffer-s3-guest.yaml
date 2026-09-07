@@ -1,0 +1,69 @@
+# Listen-only RS485 dump for the third Waveshare ESP32-S3-RS485-CAN.
+# Companion to olimpia-s3-guest.yaml - flash this instead when the link on
+# that unit will not come up and you need to see the wire.
+
+esphome:
+  name: olimpia-s3-guest-sniffer
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  # No USB-UART bridge on this board - the Type-C is native USB.
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Same address as olimpia-s3-guest.yaml: it is the same physical board, and
+  # only one of the two configs is ever flashed to it at a time.
+  manual_ip:
+    static_ip: 192.168.0.124
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  use_address: 192.168.0.124
+  power_save_mode: none
+  reboot_timeout: 15min
+
+api:
+ota:
+  - platform: esphome
+
+# ---- Listen-only UART ----
+# Modbus ASCII framing per RDE109: 9600, 7 data bits, even parity, 1 stop
+# NOT inverted - inverting makes the idle line read as continuous 0x00
+uart:
+  id: bus
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  # Held LOW by the half-duplex driver except while transmitting, and this
+  # build never transmits - so the SP3485EN stays in receive the whole time.
+  flow_control_pin: GPIO21
+  baud_rate: 9600
+  data_bits: 7
+  parity: EVEN
+  stop_bits: 1
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      timeout: 20ms
+      bytes: 256
+    sequence:
+      - lambda: |-
+          std::string hex, txt;
+          char b[8];
+          for (auto c : bytes) {
+            sprintf(b, "%02X ", c);
+            hex += b;
+            char m = c & 0x7F;
+            txt += (m >= 32 && m < 127) ? m : '.';
+          }
+          ESP_LOGI("bus", "%8u ms  n=%2u  %s| %s",
+                   (unsigned) millis(), bytes.size(), hex.c_str(), txt.c_str());

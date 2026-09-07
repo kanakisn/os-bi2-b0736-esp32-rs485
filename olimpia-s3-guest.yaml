@@ -1,0 +1,141 @@
+# Olimpia Splendid Bi2 supervisor on a Waveshare ESP32-S3-RS485-CAN.
+#
+# Third Waveshare board, third B0736 / fan coil (guest room). Identical
+# hardware and identical component config to olimpia-s3.yaml and
+# olimpia-s3-master.yaml - only the node name, the friendly name and the
+# static IP differ, so the units do not collide on the network or in Home
+# Assistant.
+#
+# IMPORTANT: this board shares NO pins with the LilyGO T-CAN485. Do not copy the
+# GPIO16/17/19 "transceiver enable" switches over from a T-CAN485 config: here
+# GPIO16 is CAN RX, GPIO17 is RS485 TX and GPIO19 is USB D-. Driving them as
+# always-on switches kills the bus and the USB port.
+
+esphome:
+  name: olimpia-s3-guest
+  # Prefixes every entity in Home Assistant so this zone is distinct from the
+  # other units (which also name their entities "Fan coils", etc.).
+  friendly_name: "Guest Room FCU"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  # ESP32-S3-WROOM-1 N16R8 on this board: 16 MB flash, 8 MB octal PSRAM.
+  # PSRAM is deliberately not enabled - nothing here needs it.
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+  # INFO for normal operation. Raise to DEBUG (and uncomment the uart debug
+  # block below) only when diagnosing the wire.
+  level: INFO
+  # The Type-C port is wired straight to the ESP32-S3 native USB pins
+  # (GPIO19 D-, GPIO20 D+). There is no USB-UART bridge chip on this board,
+  # so UART0 logging would go nowhere.
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Static IP: no DHCP lease changes, no mDNS dependency.
+  # Verified free on 2026-09-04 (no ARP entry, no reply to three probes).
+  # .123 was skipped - something already answers there, so the DHCP pool may
+  # reach that far; confirm the pool's upper bound on the router before
+  # trusting any address in this range.
+  # Must stay OUTSIDE the router's DHCP pool, and must NOT be 192.168.0.121 or
+  # 192.168.0.122 - those belong to the other two Waveshare nodes.
+  manual_ip:
+    static_ip: 192.168.0.124
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  # IMPORTANT: use_address must be the address the board is on RIGHT NOW,
+  # otherwise the OTA upload cannot find it. The very first flash is over USB,
+  # so this value is irrelevant then; from the second flash on the board is at
+  # static_ip and this is correct as written.
+  use_address: 192.168.0.124
+  # Keeps the API connection stable; the ESP32 will not sleep its radio.
+  power_save_mode: none
+  # Rejoin rather than sulk if the AP disappears briefly.
+  reboot_timeout: 15min
+
+api:
+  # Exploration services, callable from Developer Tools -> Actions.
+  services:
+    - service: read_register
+      variables:
+        reg: int
+      then:
+        - lambda: id(fancoils).read_register(reg);
+
+    - service: write_register
+      variables:
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoils).write_register(reg, value);
+
+    - service: scan_registers
+      variables:
+        start: int
+        count: int
+      then:
+        - lambda: id(fancoils).scan_registers(start, count);
+
+    - service: set_control_bit
+      variables:
+        bit: int
+        value: bool
+      then:
+        - lambda: id(fancoils).set_control_bit(bit, value);
+
+ota:
+  - platform: esphome
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+# ---- Modbus ASCII on the B0736 supervisor port (A'/B') ----
+uart:
+  id: bus
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  # SP3485EN transceiver, RE/DE tied to GPIO21. Non-inverted: HIGH = drive
+  # during TX, LOW = listen otherwise. Confirmed correct by the listen-only
+  # sniffer (RX works with the pin idle LOW). Inverting it changed nothing.
+  flow_control_pin: GPIO21
+  baud_rate: 9600
+  data_bits: 7
+  parity: EVEN
+  stop_bits: 1
+  # Wire-level diagnostics. Uncomment (and set logger level: DEBUG) to hex-dump
+  # every frame when debugging the bus.
+  # debug:
+  #   direction: BOTH
+  #   after:
+  #     timeout: 20ms
+  #     bytes: 256
+
+climate:
+  - platform: olimpia_b0736
+    name: "Fan coils"
+    id: fancoils
+    uart_id: bus
+    address: 1
+    reply_timeout: 500ms
+    max_retries: 2
+    update_interval: 5s
+
+    room_temperature:
+      name: "Room temperature"
+    fault:
+      name: "Fan coil fault"
+    chiller:
+      name: "Chiller demand"
+    boiler:
+      name: "Boiler demand"
+    online:
+      name: "B0736 link"
