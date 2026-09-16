@@ -92,3 +92,45 @@ LYWSD03MMC has a measured thermal time constant of **14.2 min** (exponential fit
 R^2 = 0.994), so it needs 45-70 minutes after being moved. An earlier reading taken
 25 minutes in suggested a +0.15 degC offset and "no trim needed"; that was the
 transient, and it was wrong in both directions.
+
+## Write-probing registers 125/126 latches fault 4 on the B0736
+
+**2026-09-16: this happened. Do not repeat it.** A write-probe sweep (write
+`current+1`, restore immediately) over the unexplained registers latched the guest
+unit into **fault 4** (`reg 105 = 0x0004`) immediately after probing **reg 126**. The
+value was restored to 0 within about a second and every other register came back to
+its baseline - but the fault is latched and does not follow the value back.
+
+It is not a system-wide condition: at the same moment the other two units read
+`reg 105 = 0` and `reg 104 = 1` (running), while the guest read `105 = 4`, `104 = 0`
+(idle, refusing to operate).
+
+**None of these clear it:**
+
+- writing 0 to reg 105 (it is a status register, not a control)
+- standby on -> off via control bit 7
+- mode cycle cooling -> heating -> cooling
+
+The remaining fix is a **physical power cycle of the B0736**.
+
+Circumstantial reading of the cause: reg 126 may select the temperature source
+(internal vs a remote air probe). Writing 1 would then select a probe that is not
+fitted, and the unit latches an "air probe missing" fault. Supporting evidence:
+**reg 117, the calibration offset, changed by itself** at the same moment
+(65526 -> 65521) without ever being written - exactly what a sensor-source change
+would do. Unproven, and not worth proving on a live system.
+
+**If a write-probe sweep is ever run again:** exclude 125 and 126, keep the
+snapshot-and-restore discipline (it worked - everything except the latched fault came
+back), and do it on a unit nobody is relying on.
+
+### What the sweep did establish
+
+| | registers |
+| --- | --- |
+| Accepted a write, restored cleanly | 100, 106, 107, 112, 113, 118, 119, 120, 121, 125, 126 |
+| Rejected the write (read-only) | 0, 1, 2, 108, 111 |
+
+**Reg 117 is writable** - confirmed when it was restored from 65521 back to 65526.
+That settles an open question, even though trimming it was already ruled out because
+the B0736's error is not a constant offset.
