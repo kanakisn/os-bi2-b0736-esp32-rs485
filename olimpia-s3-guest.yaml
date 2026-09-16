@@ -29,29 +29,11 @@ esp32:
 logger:
   # INFO for normal operation. Raise to DEBUG (and uncomment the uart debug
   # block below) only when diagnosing the wire.
-  # DISCOVERY ONLY: DEBUG globally so esp32_ble_tracker can log every
-  # advertisement it hears (a per-component level may not be more verbose than
-  # the global one). Put this back to INFO with no logs: block once the
-  # Xiaomi sensor's MAC is known - it is noisy in a block of flats.
-  level: DEBUG
+  level: INFO
   # The Type-C port is wired straight to the ESP32-S3 native USB pins
   # (GPIO19 D-, GPIO20 D+). There is no USB-UART bridge chip on this board,
   # so UART0 logging would go nowhere.
   hardware_uart: USB_SERIAL_JTAG
-  logs:
-    # Everything except the BLE scan stays at its normal volume, so the
-    # discovery log is readable and the RS485 poll is not slowed by logging.
-    esp32_ble_tracker: DEBUG
-    olimpia_b0736: INFO
-    uart: INFO
-    uart.idf: INFO
-    wifi: INFO
-    api: INFO
-    api.service: INFO
-    sensor: INFO
-    climate: INFO
-    md5: INFO
-    esp-idf: INFO
 
 # ---- BLE, for the Xiaomi LYWSD03MMC room sensor -------------------------
 # The ESP32-S3 radio is shared between WiFi and BLE. These scan parameters are
@@ -63,25 +45,14 @@ esp32_ble_tracker:
   scan_parameters:
     interval: 320ms
     window: 30ms
-    # Active scanning requests the scan response, which carries the device
-    # name - that is what makes the sensor identifiable in the log. Switch to
-    # false once we are matching on MAC, to stop transmitting entirely.
-    active: true
-  # DISCOVERY ONLY: esp32_ble_tracker does not log advertisements unless
-  # something is listening, so this trigger is what makes the scan visible.
-  # Remove it once the sensor's MAC is known.
-  on_ble_advertise:
-    - then:
-        - lambda: |-
-            // Xiaomi's OUI is A4:C1:38; also show anything that advertises a
-            // name, so a reflashed sensor (pvvx/ATC) is still recognisable.
-            const uint64_t addr = x.address_uint64();
-            const bool xiaomi = ((addr >> 24) & 0xFFFFFFULL) == 0xA4C138ULL;
-            if (xiaomi || !x.get_name().empty()) {
-              ESP_LOGI("ble_scan", "%s RSSI=%4d name='%s'%s",
-                       x.address_str().c_str(), x.get_rssi(),
-                       x.get_name().c_str(), xiaomi ? "  <-- XIAOMI" : "");
-            }
+    # Passive: the pvvx "Custom" advertisement carries temperature, humidity
+    # and battery in its service data, so a scan request buys nothing. This
+    # stops the node transmitting on BLE at all.
+    #
+    # To rediscover a sensor (new probe, or one whose MAC is unknown), set this
+    # back to true and add an on_ble_advertise: trigger that logs - the tracker
+    # logs nothing on its own, no matter the log level.
+    active: false
 
 wifi:
   ssid: !secret wifi_ssid
@@ -168,14 +139,15 @@ uart:
   #     bytes: 256
 
 # ---- Xiaomi LYWSD03MMC room probe, over BLE -----------------------------
-# Discovered by scan on 2026-09-16: MAC A4:C1:38:B1:C0:3A, advertising as
-# "LYWSD03MMC" at -75 dBm from this node while still sitting in the kitchen.
+# MAC A4:C1:38:B1:C0:3A, hardware B1.4, flashed to pvvx v5.9 on 2026-09-16.
+# It now advertises as "ATC_B1C03A" (ATC_ plus the last three bytes of the
+# MAC); on stock firmware it was "LYWSD03MMC". That name is the quickest way
+# to tell which firmware a unit is running without connecting to it.
 #
-# This is the pvvx_mithermometer platform, so it expects the sensor to be
-# running pvvx custom firmware with "Advertising type: Custom" and encryption
-# OFF. On stock Xiaomi firmware the advertisement is encrypted and this
-# platform will hear nothing - that is the expected symptom if the flash did
-# not take, NOT a wiring problem.
+# The sensor MUST be set to "Advertising type: PVVX (Custom)" with "Encrypted
+# beacon" off. pvvx_mithermometer reads only that format - Mi-like, atc1441
+# and BTHome v2 all produce silence here, which looks exactly like the sensor
+# being out of range. Check the advertising type before suspecting range.
 #
 # Until the sensor reports, the climate entity simply keeps publishing the
 # B0736's own reg 0, so this block is inert rather than harmful.

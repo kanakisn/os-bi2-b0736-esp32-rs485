@@ -1,7 +1,12 @@
 # External BLE room probe as the reported temperature
 
-**Status:** shipped (reporting half); hardware-regulation half not started.
-**Commit:** `aa02a40`. **Node:** guest only (`olimpia-s3-guest.yaml`).
+**Status:** shipped and confirmed working end to end 2026-09-16; the
+hardware-regulation half is not started.
+**Node:** guest only (`olimpia-s3-guest.yaml`).
+
+Confirmed live: 22 probe updates in 75 s, climate entity reporting the probe
+(28.19 degC) instead of reg 0 (25.5 degC), RS485 poll clean - zero timeouts,
+retries or offline events with BLE running.
 
 ## What it does
 
@@ -59,10 +64,23 @@ Making the *hardware* follow the external probe. Two candidates:
    performs at address 0 in `capture.log`, which the community map documents as
    "must write periodically for auto mode".
 
-## Discovery scaffolding still in place
+## Sensor firmware state
 
-`olimpia-s3-guest.yaml` still carries `logger: level: DEBUG`, the `logs:` block and
-the `on_ble_advertise:` logging trigger, and scans with `active: true`. All of it is
-there to find the sensor. Once the probe is confirmed reporting: drop the trigger and
-the `logs:` block, return the level to `INFO`, and set `active: false` so the node
-stops transmitting scan requests.
+Hardware **B1.4**, flashed to **pvvx v5.9**. Because it is B1.4 and not B1.5/B1.6,
+the two-stage `Original_OTA_` path in pvvx issue #602 never applied - it flashed
+directly. Login did need the MiHome credentials (Device known id / Mi Token / Mi Bind
+Key) from the Xiaomi cloud token extractor; `Do Activation` alone was not offered on
+`2.1.1_0159`.
+
+**The advertised name is the firmware tell:** `ATC_B1C03A` = pvvx (ATC_ plus the last
+three bytes of the MAC), `LYWSD03MMC` = stock. No connection needed to check.
+
+## Discovery scaffolding - removed, and how to get it back
+
+The scan scaffolding has been taken out: logging is back to `INFO` with no `logs:`
+block, the `on_ble_advertise:` trigger is gone, and scanning is `active: false` so the
+node no longer transmits on BLE at all.
+
+To rediscover a sensor later (new probe, unknown MAC): set `active: true` and add back
+an `on_ble_advertise:` trigger that logs. The tracker logs nothing on its own no
+matter the log level - see `.knowledge/gotchas.md`.
