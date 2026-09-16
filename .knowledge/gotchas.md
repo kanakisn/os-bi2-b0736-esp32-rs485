@@ -55,3 +55,40 @@ or the wrong MAC.
 If a flashed sensor reports nothing, check the advertising *type* in the pvvx flasher
 before moving the sensor or touching the MAC. `atc1441` and Mi-like formats produce
 the same silence. Stock firmware would need `xiaomi_lywsd03mmc` plus a bindkey.
+
+## The B0736's own sensor does not measure the room while the unit is running
+
+Measured 2026-09-16 on the guest unit, with a settled external probe for reference.
+The fan coil cooled continuously for an hour (640 samples, `Action: COOLING`
+throughout, no idle period). Over that hour:
+
+| time  | probe (real room) | reg 0 (B0736) | gap |
+| ----- | ----------------- | ------------- | ---- |
+| 16:09 | -                 | 25.5          | -    |
+| 16:39 | 25.87             | 24.6          | +1.3 |
+| 16:51 | 25.56             | 23.5          | +2.1 |
+| 17:07 | 25.49 (flat 15m)  | 23.0          | +2.5 |
+
+The probe was **flat** at 25.5 for the last fifteen minutes while reg 0 kept falling.
+They are not measuring the same air. The B0736's internal sensor is being pulled down
+by the unit's own cold output - it reads its supply air, not the room.
+
+**Consequences:**
+
+1. **Reg 117 cannot fix this.** The error is not a constant sensor offset, it grows
+   with cooling runtime (+0.15 degC when settled and idle, +2.5 degC after an hour of
+   cooling). A fixed trim would be wrong in every state except the one it was measured
+   in. This rules out the reg 117 plan recorded in
+   `.knowledge/features/external-ble-room-probe.md`.
+2. **The zone undershoots its setpoint badly.** Setpoint 22.0, B0736 reads 23.0 and
+   falling, so it will stop cooling shortly - while the room is actually 25.5. That is
+   a ~3.5 degC comfort error, and it is a property of the installation, not a bug in
+   this project.
+3. **Any single-point comparison of probe vs reg 0 is meaningless** unless you also
+   record what the unit was doing. Note the `Action:` and reg 9 state alongside.
+
+**Do not conclude anything from a probe reading until it has settled.** The Xiaomi
+LYWSD03MMC has a measured thermal time constant of **14.2 min** (exponential fit,
+R^2 = 0.994), so it needs 45-70 minutes after being moved. An earlier reading taken
+25 minutes in suggested a +0.15 degC offset and "no trim needed"; that was the
+transient, and it was wrong in both directions.
