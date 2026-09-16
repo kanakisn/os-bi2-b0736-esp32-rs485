@@ -22,6 +22,10 @@ namespace olimpia_b0736 {
 // Derived by capturing traffic between a B1130 WiFi kit and the thermostat.
 // ---------------------------------------------------------------------------
 static const uint16_t REG_ROOM_TEMP = 0;    // R   room temperature, x0.1 degC
+// Reg 0/1/2 read 0x7FFF when the B0736's air probe is not connected. It means
+// "no valid reading", NOT 3276.7 degC - publishing it raw poisons everything
+// downstream. Reg 105 latches fault bit 3 (value 8) at the same time.
+static const uint16_t TEMP_INVALID = 0x7FFF;
 static const uint16_t REG_STATUS = 9;       // R   b14 EV1, b13 boiler, b12 chiller, b11 EV2
 static const uint16_t REG_FAULT = 105;      // R   0 = healthy
 static const uint16_t REG_IDENT = 199;      // R   constant 1200, read once per session

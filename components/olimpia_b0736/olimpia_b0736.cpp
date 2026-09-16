@@ -350,6 +350,17 @@ void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
       break;
 
     case REG_ROOM_TEMP: {
+      if (value == TEMP_INVALID) {
+        // Air probe disconnected. Report nothing rather than 3276.7 degC.
+        if (!std::isnan(this->b0736_temperature_))
+          ESP_LOGW(TAG, "room probe reads 0x7FFF - not connected?");
+        this->b0736_temperature_ = NAN;
+#ifdef USE_SENSOR
+        if (this->room_temperature_sensor_ != nullptr)
+          this->room_temperature_sensor_->publish_state(NAN);
+#endif
+        break;
+      }
       float t = static_cast<float>(value) * 0.1f;
       // current_temperature is chosen in publish_all_(), which may prefer an
       // external probe over this; the B0736's own reading is always kept and

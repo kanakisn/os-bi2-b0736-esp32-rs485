@@ -205,6 +205,43 @@ sensor:
       name: "External probe battery voltage"
       entity_category: diagnostic
 
+  # --- what the compensator is doing, so it is visible rather than magic ---
+  - platform: template
+    name: "Temperature error"
+    id: temp_error
+    icon: "mdi:delta"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 2
+    device_class: temperature
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: |-
+      const float p = id(guest_ble_temperature).state;
+      const float r = id(fancoils).current_temperature;
+      if (std::isnan(p) || std::isnan(r)) return {};
+      return p - r;
+
+  - platform: template
+    name: "Corrected setpoint"
+    id: corrected_setpoint
+    icon: "mdi:thermometer-check"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    update_interval: 30s
+    lambda: |-
+      const float p = id(guest_ble_temperature).state;
+      const float r = id(fancoils).current_temperature;
+      const float w = id(target_room_temp).state;
+      if (std::isnan(p) || std::isnan(r) || std::isnan(w)) return {};
+      float wanted = w - (p - r);
+      int raw = (int) lroundf((wanted - 15.5f) * 2.0f);
+      if (raw < 1) raw = 1;
+      if (raw > 25) raw = 25;
+      return 15.5f + 0.5f * raw;
+
 climate:
   - platform: olimpia_b0736
     name: "Fan coils"
@@ -233,3 +270,84 @@ climate:
       name: "Boiler demand"
     online:
       name: "B0736 link"
+
+# ---- Setpoint compensation ----------------------------------------------
+# The B0736's own probe sits in the fan coil's cold output, so it reads well
+# below the real room - about 0.15 degC when idle, but +2.5 degC after an hour
+# of cooling. It regulates on that reading, so the room settles far from its
+# setpoint. Every route to feeding it the real temperature was tested and
+# refused (see .knowledge/decisions/2026-09-16-external-probe-cannot-steer-*).
+#
+# So compensate the only thing that IS writable - the setpoint:
+#
+#     error    = probe - reg0            how much warmer the room really is
+#     write to = target - error          a deliberately wrong setpoint
+#
+# The B0736 then reaches its wrong setpoint at the moment the real room
+# reaches the right temperature.
+#
+# Limits worth knowing: reg 231 clamps to 16-28 degC and quantises to 0.5, so
+# an error bigger than (target - 16) cannot be fully corrected. The write only
+# happens when the computed value actually differs, so the bus stays quiet.
+
+number:
+  - platform: template
+    name: "Target room temperature"
+    id: target_room_temp
+    icon: "mdi:home-thermometer"
+    optimistic: true
+    restore_value: true
+    initial_value: 24.0
+    min_value: 16.0
+    max_value: 28.0
+    step: 0.5
+    unit_of_measurement: "°C"
+    device_class: temperature
+    mode: box
+
+switch:
+  - platform: template
+    name: "Setpoint compensation"
+    id: compensation_enabled
+    icon: "mdi:thermostat-auto"
+    optimistic: true
+    # Off after a reboot on purpose: it writes to the B0736 unattended, so it
+    # should only ever run because someone turned it on.
+    restore_mode: RESTORE_DEFAULT_OFF
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (!id(compensation_enabled).state)
+            return;
+
+          const float probe = id(guest_ble_temperature).state;   // real room
+          const float reg0  = id(fancoils).current_temperature;  // what the B0736 believes
+          const float want  = id(target_room_temp).state;
+          if (std::isnan(probe) || std::isnan(reg0) || std::isnan(want)) {
+            ESP_LOGW("compensator", "skipped: probe=%.1f reg0=%.1f want=%.1f", probe, reg0, want);
+            return;
+          }
+
+          const float error = probe - reg0;
+          float wanted = want - error;
+
+          // reg 231 encodes (degC - 15.5) * 2, clamped raw 1..25 => 16.0..28.0
+          int raw = (int) lroundf((wanted - 15.5f) * 2.0f);
+          const int raw_lo = 1, raw_hi = 25;
+          bool clamped = false;
+          if (raw < raw_lo) { raw = raw_lo; clamped = true; }
+          if (raw > raw_hi) { raw = raw_hi; clamped = true; }
+          const float applied = 15.5f + 0.5f * raw;
+
+          const int cur_raw = (int) lroundf((id(fancoils).target_temperature - 15.5f) * 2.0f);
+          if (raw == cur_raw) {
+            ESP_LOGD("compensator", "no change: error %+.2f, setpoint stays %.1f", error, applied);
+            return;
+          }
+
+          ESP_LOGI("compensator",
+                   "room %.2f, B0736 %.2f (error %+.2f), want %.1f -> setpoint %.1f%s",
+                   probe, reg0, error, want, applied, clamped ? "  [CLAMPED]" : "");
+          id(fancoils).write_register(231, raw);
