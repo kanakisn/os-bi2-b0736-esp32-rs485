@@ -1,6 +1,16 @@
 # Setpoint compensation (guest node)
 
-**Status:** built and deployed 2026-09-16, **switched off by default**.
+**Status:** built and deployed 2026-09-16. **Switched OFF, and that is the preference.**
+
+The owner tried it and turned it off: the climate card should mirror the hardware, not
+show a setpoint nobody chose. Compensation necessarily breaks that - it writes a
+deliberately wrong setpoint, so the card shows 21.0 when you asked for 22.0. Leave it
+off unless someone asks for it, and do not "helpfully" re-enable it.
+
+The measurement entities it brought with it stay useful on their own and are still
+live: `Temperature error` shows the real problem (+1.26 degC and climbing during
+cooling when this was written) and `Corrected setpoint` shows what compensation *would*
+do, without doing it.
 
 ## Why it exists
 
