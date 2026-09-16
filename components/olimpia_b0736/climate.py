@@ -23,6 +23,8 @@ CONF_BOILER = "boiler"
 CONF_ONLINE = "online"
 CONF_REPLY_TIMEOUT = "reply_timeout"
 CONF_MAX_RETRIES = "max_retries"
+CONF_EXTERNAL_TEMPERATURE = "external_temperature"
+CONF_EXTERNAL_TEMPERATURE_TIMEOUT = "external_temperature_timeout"
 
 OlimpiaB0736 = olimpia_b0736_ns.class_(
     "OlimpiaB0736", climate.Climate, uart.UARTDevice, cg.PollingComponent
@@ -35,6 +37,12 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_ADDRESS, default=1): cv.int_range(min=1, max=247),
             cv.Optional(CONF_REPLY_TIMEOUT, default="500ms"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MAX_RETRIES, default=2): cv.int_range(min=0, max=5),
+            # An existing sensor (e.g. a BLE room probe) to report as the
+            # climate entity's current temperature in place of reg 0.
+            cv.Optional(CONF_EXTERNAL_TEMPERATURE): cv.use_id(sensor.Sensor),
+            cv.Optional(
+                CONF_EXTERNAL_TEMPERATURE_TIMEOUT, default="15min"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_ROOM_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 accuracy_decimals=1,
@@ -70,6 +78,15 @@ async def to_code(config):
     cg.add(var.set_address(config[CONF_ADDRESS]))
     cg.add(var.set_timeout(config[CONF_REPLY_TIMEOUT]))
     cg.add(var.set_max_retries(config[CONF_MAX_RETRIES]))
+
+    if CONF_EXTERNAL_TEMPERATURE in config:
+        ext = await cg.get_variable(config[CONF_EXTERNAL_TEMPERATURE])
+        cg.add(var.set_external_temperature_sensor(ext))
+        cg.add(
+            var.set_external_temperature_timeout(
+                config[CONF_EXTERNAL_TEMPERATURE_TIMEOUT]
+            )
+        )
 
     if CONF_ROOM_TEMPERATURE in config:
         sens = await sensor.new_sensor(config[CONF_ROOM_TEMPERATURE])

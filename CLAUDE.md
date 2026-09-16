@@ -93,9 +93,33 @@ write is deferred behind a read (`control_pending_`).
 | 246 | R | Maximum setpoint, ×0.1 °C (reads 280) |
 | 247 | R | Unknown. The B1130 polls it every cycle; constant 0 so far |
 
-Registers 8, 113, 117, 245, 246 and 247 are **not** in `capture.log` in the case of
-117/8/245/246 — the B1130 never reads them, but the B0736 answers them fine. Absence
-from the capture means "the old kit did not ask", not "the register does not exist".
+Registers 8, 117, 245 and 246 are **not** in `capture.log` — the B1130 never reads
+them, but the B0736 answers them fine. Absence from the capture means "the old kit
+did not ask", not "the register does not exist".
+
+**Exactly 40 registers are implemented** on the supervisor port. A full 0–255 sweep of
+all three units (`tools/osreg.py`, 64 at a time) answered on: 0, 1, 2, 8, 9, 100, 104,
+105, 106, 107, 108, 111, 112, 113, 117, 118, 119, 120, 121, 125, 126, 127, 128, 129,
+199, 200, 201, 207, 209, 218, 219, 221, 222, 224, 225, 231, 233, 245, 246, 247.
+Everything else is silent. The B0736 **never returns a Modbus exception** — an
+unimplemented register produces no reply at all, so a timeout is the normal answer for
+"does not exist" and must not be read as a bus fault.
+
+State-sensitive registers, from diffing a unit in standby against one cooling: 0/1/2
+(ambient), 9, 104 (0 idle → 1 running, tracks the chiller), 106, 107, 108, 201, 207
+(bit 7 mirrors the standby bit of 201) and 222 (a large per-unit counter).
+
+#### Reg 113 and 247 — still unknown, but bounded
+
+Both are implemented, both answer, both are polled by the B1130 on **every** cycle,
+and both read 0 in every state anyone has observed: 819 capture samples spanning
+heating *and* cooling, six control-word transitions including standby, four setpoints
+and chiller on/off; plus three live units covering standby vs cooling. So they are not
+driven by mode, fan, standby, setpoint or chiller demand — all eliminated.
+
+The one axis never exercised is **fault**: reg 105 has never left 0, in the capture or
+since. That they are read every cycle alongside 105 makes fault/alarm detail words the
+best remaining explanation. Do not provoke a fault on a live system to confirm it.
 
 #### Reg 117, and how it was pinned down
 
@@ -131,6 +155,35 @@ connects to port 6053 and calls the same services; `tools/sample.py` samples a s
 registers across all three nodes on a cadence. Both need `aioesphomeapi`, which is
 already bundled inside the esphome install (`head -1 $(which esphome)` gives the
 interpreter) — there is nothing to `pip install`.
+
+## External room probe over BLE (guest node only)
+
+`olimpia-s3-guest.yaml` runs `esp32_ble_tracker` alongside the RS485 work and reads a
+Xiaomi LYWSD03MMC at `A4:C1:38:B1:C0:3A` as the room temperature.
+
+- The component option is `external_temperature:` (an existing sensor id) plus
+  `external_temperature_timeout:` (default 15 min). It only changes what the climate
+  entity **publishes**; the B0736 still regulates on its own internal sensor. Making
+  the hardware follow the external probe is a separate, unsolved problem — the
+  candidates are trimming reg 117 (EEPROM, so writes must be rare) or the broadcast
+  FC06 write to fan-coil reg 103 that the B1130 does in `capture.log`.
+- `current_temperature` is chosen in `publish_all_()`, not in the `REG_ROOM_TEMP`
+  handler. Reg 0 is always kept in `b0736_temperature_` and always published on the
+  `room_temperature` sensor, so the two can be compared.
+- Staleness matters: a BLE probe that stops advertising must not freeze the reported
+  temperature. After the timeout the component falls back to reg 0 and logs a warning.
+- **The sensor must run pvvx custom firmware** with "Advertising type: Custom" and
+  encryption off. Stock Xiaomi firmware advertises an *encrypted* payload that
+  `pvvx_mithermometer` cannot read — the symptom is simply no data, which looks
+  identical to a range problem. Stock would need `xiaomi_lywsd03mmc` plus a bindkey.
+- BLE and WiFi share one radio. Scan parameters are the ESPHome default (320 ms
+  interval / 30 ms window, ~9% duty cycle) deliberately, because this node must still
+  answer the B0736 inside `reply_timeout`. Measured at -75 dBm with the sensor a room
+  away, the RS485 poll was unaffected: no timeouts, retries or offline events. If
+  "B0736 link" starts flapping after a BLE change, widen the scan interval first.
+- The `on_ble_advertise` logging block and `logger: level: DEBUG` are **discovery
+  scaffolding**. `esp32_ble_tracker` logs nothing unless something is listening, which
+  is why the trigger exists at all. Drop both once the sensor is confirmed.
 
 ## Hardware constraints that bite
 

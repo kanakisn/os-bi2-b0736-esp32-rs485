@@ -59,6 +59,24 @@ void OlimpiaB0736::setup() {
   this->target_temperature = NAN;
   this->current_temperature = NAN;
   this->action = climate::CLIMATE_ACTION_OFF;
+
+#ifdef USE_SENSOR
+  // An external probe pushes at its own rate (a BLE sensor advertises every
+  // few seconds at best), so latch its value and the time it arrived rather
+  // than reading the sensor inline - that is what makes staleness detectable.
+  if (this->external_temperature_sensor_ != nullptr) {
+    this->external_temperature_sensor_->add_on_state_callback([this](float v) {
+      if (std::isnan(v))
+        return;
+      this->external_temperature_ = v;
+      this->external_temperature_at_ = millis();
+      if (this->external_stale_logged_) {
+        ESP_LOGI(TAG, "external probe back: %.1f degC", v);
+        this->external_stale_logged_ = false;
+      }
+    });
+  }
+#endif
 }
 
 void OlimpiaB0736::dump_config() {
@@ -302,7 +320,10 @@ void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
 
     case REG_ROOM_TEMP: {
       float t = static_cast<float>(value) * 0.1f;
-      this->current_temperature = t;
+      // current_temperature is chosen in publish_all_(), which may prefer an
+      // external probe over this; the B0736's own reading is always kept and
+      // always published on its own sensor.
+      this->b0736_temperature_ = t;
 #ifdef USE_SENSOR
       if (this->room_temperature_sensor_ != nullptr)
         this->room_temperature_sensor_->publish_state(t);
@@ -352,6 +373,21 @@ void OlimpiaB0736::on_register_(uint16_t reg, uint16_t value) {
 
 void OlimpiaB0736::publish_all_() {
   const bool standby = (this->control_reg_ & CTRL_STANDBY) != 0;
+
+  // Pick what to report as the current temperature. The B0736 regulates on its
+  // own sensor regardless - this only changes what Home Assistant sees.
+  this->current_temperature = this->b0736_temperature_;
+#ifdef USE_SENSOR
+  if (this->external_temperature_sensor_ != nullptr && !std::isnan(this->external_temperature_)) {
+    const uint32_t age = millis() - this->external_temperature_at_;
+    if (age <= this->external_timeout_ms_) {
+      this->current_temperature = this->external_temperature_;
+    } else if (!this->external_stale_logged_) {
+      ESP_LOGW(TAG, "external probe stale (%u s), falling back to B0736 reg 0", age / 1000);
+      this->external_stale_logged_ = true;
+    }
+  }
+#endif
 
   if (standby) {
     this->mode = climate::CLIMATE_MODE_OFF;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <vector>
 
 #include "esphome/core/component.h"
@@ -68,6 +69,12 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
 
 #ifdef USE_SENSOR
   void set_room_temperature_sensor(sensor::Sensor *s) { this->room_temperature_sensor_ = s; }
+  // Report an external probe (e.g. a BLE room sensor) as the climate entity's
+  // current temperature instead of the B0736's own reg 0. The B0736 keeps
+  // regulating on its internal sensor either way - this only changes what is
+  // published. Falls back to reg 0 if the external sensor goes stale.
+  void set_external_temperature_sensor(sensor::Sensor *s) { this->external_temperature_sensor_ = s; }
+  void set_external_temperature_timeout(uint32_t ms) { this->external_timeout_ms_ = ms; }
 #endif
 #ifdef USE_BINARY_SENSOR
   void set_fault_binary_sensor(binary_sensor::BinarySensor *s) { this->fault_binary_sensor_ = s; }
@@ -137,8 +144,19 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
   // registers requested by hand, so their replies get logged prominently
   std::vector<uint16_t> manual_reads_;
 
+  // Room temperature as reported by the B0736 itself (reg 0), always kept even
+  // when an external probe is what gets published.
+  float b0736_temperature_{NAN};
+
 #ifdef USE_SENSOR
   sensor::Sensor *room_temperature_sensor_{nullptr};
+  sensor::Sensor *external_temperature_sensor_{nullptr};
+  float external_temperature_{NAN};
+  uint32_t external_temperature_at_{0};
+  // A BLE sensor that has stopped advertising must not freeze the reported
+  // temperature forever; after this long we fall back to the B0736's own.
+  uint32_t external_timeout_ms_{900000};  // 15 min
+  bool external_stale_logged_{false};
 #endif
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *fault_binary_sensor_{nullptr};

@@ -29,11 +29,59 @@ esp32:
 logger:
   # INFO for normal operation. Raise to DEBUG (and uncomment the uart debug
   # block below) only when diagnosing the wire.
-  level: INFO
+  # DISCOVERY ONLY: DEBUG globally so esp32_ble_tracker can log every
+  # advertisement it hears (a per-component level may not be more verbose than
+  # the global one). Put this back to INFO with no logs: block once the
+  # Xiaomi sensor's MAC is known - it is noisy in a block of flats.
+  level: DEBUG
   # The Type-C port is wired straight to the ESP32-S3 native USB pins
   # (GPIO19 D-, GPIO20 D+). There is no USB-UART bridge chip on this board,
   # so UART0 logging would go nowhere.
   hardware_uart: USB_SERIAL_JTAG
+  logs:
+    # Everything except the BLE scan stays at its normal volume, so the
+    # discovery log is readable and the RS485 poll is not slowed by logging.
+    esp32_ble_tracker: DEBUG
+    olimpia_b0736: INFO
+    uart: INFO
+    uart.idf: INFO
+    wifi: INFO
+    api: INFO
+    api.service: INFO
+    sensor: INFO
+    climate: INFO
+    md5: INFO
+    esp-idf: INFO
+
+# ---- BLE, for the Xiaomi LYWSD03MMC room sensor -------------------------
+# The ESP32-S3 radio is shared between WiFi and BLE. These scan parameters are
+# a ~9% duty cycle (the ESPHome default), chosen to leave the radio free: this
+# node also has to answer the B0736 inside reply_timeout (500ms). If the
+# "B0736 link" binary sensor starts flapping after this was added, widen
+# interval before anything else.
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 30ms
+    # Active scanning requests the scan response, which carries the device
+    # name - that is what makes the sensor identifiable in the log. Switch to
+    # false once we are matching on MAC, to stop transmitting entirely.
+    active: true
+  # DISCOVERY ONLY: esp32_ble_tracker does not log advertisements unless
+  # something is listening, so this trigger is what makes the scan visible.
+  # Remove it once the sensor's MAC is known.
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            // Xiaomi's OUI is A4:C1:38; also show anything that advertises a
+            // name, so a reflashed sensor (pvvx/ATC) is still recognisable.
+            const uint64_t addr = x.address_uint64();
+            const bool xiaomi = ((addr >> 24) & 0xFFFFFFULL) == 0xA4C138ULL;
+            if (xiaomi || !x.get_name().empty()) {
+              ESP_LOGI("ble_scan", "%s RSSI=%4d name='%s'%s",
+                       x.address_str().c_str(), x.get_rssi(),
+                       x.get_name().c_str(), xiaomi ? "  <-- XIAOMI" : "");
+            }
 
 wifi:
   ssid: !secret wifi_ssid
@@ -119,6 +167,33 @@ uart:
   #     timeout: 20ms
   #     bytes: 256
 
+# ---- Xiaomi LYWSD03MMC room probe, over BLE -----------------------------
+# Discovered by scan on 2026-09-16: MAC A4:C1:38:B1:C0:3A, advertising as
+# "LYWSD03MMC" at -75 dBm from this node while still sitting in the kitchen.
+#
+# This is the pvvx_mithermometer platform, so it expects the sensor to be
+# running pvvx custom firmware with "Advertising type: Custom" and encryption
+# OFF. On stock Xiaomi firmware the advertisement is encrypted and this
+# platform will hear nothing - that is the expected symptom if the flash did
+# not take, NOT a wiring problem.
+#
+# Until the sensor reports, the climate entity simply keeps publishing the
+# B0736's own reg 0, so this block is inert rather than harmful.
+sensor:
+  - platform: pvvx_mithermometer
+    mac_address: "A4:C1:38:B1:C0:3A"
+    temperature:
+      name: "Guest room temperature"
+      id: guest_ble_temperature
+    humidity:
+      name: "Guest room humidity"
+    battery_level:
+      name: "Guest room probe battery"
+      entity_category: diagnostic
+    battery_voltage:
+      name: "Guest room probe battery voltage"
+      entity_category: diagnostic
+
 climate:
   - platform: olimpia_b0736
     name: "Fan coils"
@@ -129,6 +204,16 @@ climate:
     max_retries: 2
     update_interval: 5s
 
+    # Publish the BLE probe as the entity's current temperature instead of the
+    # B0736's own sensor. The B0736 still REGULATES on its internal probe -
+    # this only changes what Home Assistant sees. If the BLE sensor goes quiet
+    # for longer than the timeout, the component falls back to reg 0 and logs
+    # a warning, so a flat battery degrades instead of freezing the reading.
+    external_temperature: guest_ble_temperature
+    external_temperature_timeout: 15min
+
+    # Still exposed separately, so the two can be compared - that difference is
+    # what a future reg 117 trim would have to cancel out.
     room_temperature:
       name: "Room temperature"
     fault:
