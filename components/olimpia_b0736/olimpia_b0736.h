@@ -40,6 +40,20 @@ static const uint16_t FAN_MAX = 3;
 static const uint16_t MODE_HEATING = 3;
 static const uint16_t MODE_COOLING = 5;
 
+// Fan-coil registers, reachable only by Modbus broadcast (address 0). The
+// B0736 does not answer reads of these on its supervisor port - they are not
+// its registers, they belong to the fan coils on the internal A/B bus. The
+// B1130 writes all three periodically in capture.log.
+static const uint16_t REG_FC_CONTROL = 101;   // W   control word
+static const uint16_t REG_FC_SETPOINT = 102;  // W   setpoint, x0.1 degC
+static const uint16_t REG_FC_AMBIENT = 103;   // W   ambient, x0.1 degC
+
+// Txn::addr sentinel: "use the configured slave address". Address 0 has to
+// stay available as the real Modbus broadcast address, so it cannot double as
+// the "unset" marker.
+static const uint8_t ADDR_USE_CONFIGURED = 0xFF;
+static const uint8_t ADDR_BROADCAST = 0x00;
+
 static const uint16_t STATUS_EV2 = 0x0800;
 static const uint16_t STATUS_CHILLER = 0x1000;
 static const uint16_t STATUS_BOILER = 0x2000;
@@ -66,6 +80,10 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
   void scan_registers(int start, int count);
   // Set or clear a single bit of the control word, preserving everything else.
   void set_control_bit(int bit, bool value);
+  // Write one register as a Modbus BROADCAST (address 0). Nothing replies, so
+  // nothing can be verified - this is the only way to reach the fan-coil
+  // registers 101/102/103, which the B0736 does not expose on its own address.
+  void write_register_broadcast(int reg, int value);
 
 #ifdef USE_SENSOR
   void set_room_temperature_sensor(sensor::Sensor *s) { this->room_temperature_sensor_ = s; }
@@ -89,7 +107,7 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
 
   // --- transaction plumbing -------------------------------------------------
   struct Txn {
-    uint8_t addr;  // 0 = use the configured address
+    uint8_t addr;  // ADDR_USE_CONFIGURED = the configured address; 0 = broadcast
     uint8_t fn;
     uint16_t reg;
     uint16_t val;  // FC03: quantity, FC06: value to write
@@ -97,7 +115,7 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
 
   enum State : uint8_t { STATE_IDLE, STATE_WAITING };
 
-  void enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr = 0);
+  void enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr = ADDR_USE_CONFIGURED);
   void send_next_();
   void send_frame_(const Txn &t);
   void handle_frame_();

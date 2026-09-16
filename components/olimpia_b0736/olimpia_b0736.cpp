@@ -129,7 +129,7 @@ void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr
 
 void OlimpiaB0736::send_frame_(const Txn &t) {
   std::vector<uint8_t> payload = {
-      t.addr != 0 ? t.addr : this->address_,
+      t.addr != ADDR_USE_CONFIGURED ? t.addr : this->address_,
       t.fn,
       static_cast<uint8_t>(t.reg >> 8),
       static_cast<uint8_t>(t.reg & 0xFF),
@@ -161,6 +161,18 @@ void OlimpiaB0736::send_next_() {
   this->rx_.clear();
   this->collecting_ = false;
   this->send_frame_(this->current_);
+  // A Modbus broadcast is never answered. Waiting on it would time out, burn
+  // every retry and eventually clear session_ok_, taking the whole link down
+  // on a transaction that worked exactly as intended.
+  if (this->current_.addr == ADDR_BROADCAST) {
+    // INFO, not DEBUG: a broadcast is rare, explicitly triggered, and
+    // unverifiable by any reply, so the log line is the only evidence it was
+    // ever put on the wire. At DEBUG it is compiled out of a level: INFO build.
+    ESP_LOGI(TAG, "broadcast fn=%02X reg=%u val=%u ON THE WIRE (no reply expected)",
+             this->current_.fn, this->current_.reg, this->current_.val);
+    this->state_ = STATE_IDLE;
+    return;
+  }
   this->state_ = STATE_WAITING;
   this->sent_at_ = millis();
 }
@@ -218,10 +230,13 @@ void OlimpiaB0736::handle_frame_() {
     ESP_LOGW(TAG, "LRC mismatch: %s", this->rx_.c_str());
     return;
   }
-  const uint8_t expect = this->current_.addr != 0 ? this->current_.addr : this->address_;
+  // A broadcast never reaches here: send_next_() leaves the state machine IDLE
+  // for one, and this function returns early unless state_ == STATE_WAITING.
+  const uint8_t expect =
+      this->current_.addr != ADDR_USE_CONFIGURED ? this->current_.addr : this->address_;
   if (b[0] != expect)
     return;  // not for us
-  if (this->current_.addr != 0)
+  if (this->current_.addr != ADDR_USE_CONFIGURED)
     ESP_LOGI(TAG, "*** ADDRESS %u ANSWERED (reg %u) ***", b[0], this->current_.reg);
 
   this->consecutive_failures_ = 0;
@@ -531,6 +546,19 @@ void OlimpiaB0736::write_register(int reg, int value) {
   this->enqueue_(0x06, static_cast<uint16_t>(reg), static_cast<uint16_t>(value));
   this->manual_reads_.push_back(static_cast<uint16_t>(reg));
   this->enqueue_(0x03, static_cast<uint16_t>(reg), 1);  // read back
+}
+
+void OlimpiaB0736::write_register_broadcast(int reg, int value) {
+  if (reg < 0 || reg > 0xFFFF || value < 0 || value > 0xFFFF) {
+    ESP_LOGW(TAG, "write_register_broadcast: %d/%d out of range", reg, value);
+    return;
+  }
+  if (reg >= 200) {
+    ESP_LOGW(TAG, "register %d is EEPROM - refusing to broadcast-write it", reg);
+    return;
+  }
+  ESP_LOGI(TAG, "BROADCAST write reg %d = %d (0x%04X)", reg, value, value);
+  this->enqueue_(0x06, static_cast<uint16_t>(reg), static_cast<uint16_t>(value), ADDR_BROADCAST);
 }
 
 void OlimpiaB0736::scan_registers(int start, int count) {

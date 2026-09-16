@@ -109,6 +109,21 @@ api:
       then:
         - lambda: id(fancoils).set_control_bit(bit, value);
 
+    # EXPERIMENT: write a fan-coil register by Modbus broadcast (address 0).
+    # This is the only way to reach regs 101/102/103 - the B0736 does not
+    # answer them on its own address, they belong to the fan coils. Reg 103 is
+    # the ambient temperature the fan coil regulates on (x0.1 degC), which the
+    # B1130 writes periodically in capture.log.
+    #
+    # Nothing replies to a broadcast, so nothing can be read back: the only
+    # evidence is a change in the fan coil's behaviour.
+    - service: write_register_broadcast
+      variables:
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoils).write_register_broadcast(reg, value);
+
 ota:
   - platform: esphome
 
