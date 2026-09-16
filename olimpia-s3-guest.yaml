@@ -170,15 +170,15 @@ sensor:
   - platform: pvvx_mithermometer
     mac_address: "A4:C1:38:B1:C0:3A"
     temperature:
-      name: "Guest room temperature"
+      name: "External probe temperature"
       id: guest_ble_temperature
     humidity:
-      name: "Guest room humidity"
+      name: "External probe humidity"
     battery_level:
-      name: "Guest room probe battery"
+      name: "External probe battery"
       entity_category: diagnostic
     battery_voltage:
-      name: "Guest room probe battery voltage"
+      name: "External probe battery voltage"
       entity_category: diagnostic
 
 climate:
@@ -191,16 +191,14 @@ climate:
     max_retries: 2
     update_interval: 5s
 
-    # Publish the BLE probe as the entity's current temperature instead of the
-    # B0736's own sensor. The B0736 still REGULATES on its internal probe -
-    # this only changes what Home Assistant sees. If the BLE sensor goes quiet
-    # for longer than the timeout, the component falls back to reg 0 and logs
-    # a warning, so a flat battery degrades instead of freezing the reading.
-    external_temperature: guest_ble_temperature
-    external_temperature_timeout: 15min
-
-    # Still exposed separately, so the two can be compared - that difference is
-    # what a future reg 117 trim would have to cancel out.
+    # NOTE: external_temperature: is deliberately NOT set. The climate entity
+    # reports the B0736's own reg 0, so what Home Assistant shows is what the
+    # hardware is actually regulating on. The BLE probe is published on its own
+    # entities instead ("External probe ..."), so the two can be compared
+    # without one masquerading as the other.
+    #
+    # The component still supports external_temperature: - see
+    # .knowledge/features/external-ble-room-probe.md. It is left unwired here.
     room_temperature:
       name: "Room temperature"
     fault:

@@ -10,12 +10,20 @@ retries or offline events with BLE running.
 
 ## What it does
 
-The climate entity publishes an external sensor as its `current_temperature`
-instead of the B0736's reg 0. On the guest node that sensor is a Xiaomi
-LYWSD03MMC at `A4:C1:38:B1:C0:3A`, read over BLE by the ESP32-S3 itself.
+A Xiaomi LYWSD03MMC at `A4:C1:38:B1:C0:3A` is read over BLE by the ESP32-S3 and
+published as its own entities: **External probe temperature / humidity / battery /
+battery voltage**.
 
-**The B0736 still regulates on its own internal probe.** This changes what Home
-Assistant sees, not what the fan coil does. See "Not done yet" below.
+**The climate entity reports the B0736's own reg 0, not the probe.** Decided
+2026-09-16: what Home Assistant shows for the fan coil should be what the hardware is
+actually regulating on, otherwise the entity claims a temperature the unit is not
+controlling to. The two are published side by side so the error between them is
+visible - which is the point, given that error reaches 2.5 degC after an hour of
+cooling.
+
+The component's `external_temperature:` option still exists and still works (it
+overrides `current_temperature`, with a staleness fallback to reg 0). It is
+deliberately **left unwired** in `olimpia-s3-guest.yaml`.
 
 ## Where it lives
 
