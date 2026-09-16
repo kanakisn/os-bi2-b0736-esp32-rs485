@@ -84,6 +84,14 @@ class OlimpiaB0736 : public climate::Climate, public uart::UARTDevice, public Po
   // nothing can be verified - this is the only way to reach the fan-coil
   // registers 101/102/103, which the B0736 does not expose on its own address.
   void write_register_broadcast(int reg, int value);
+  // Read/write one register at an EXPLICIT slave address, not the configured
+  // one. The fan coils may sit at their own addresses on the same wire; a
+  // unicast to them is answered, so unlike a broadcast it can be verified.
+  // Write one register with FC16 (write multiple registers, quantity 1)
+  // instead of FC06. Some slaves accept only FC16 for certain registers.
+  void write_register_fc16(int reg, int value);
+  void read_register_at(int addr, int reg);
+  void write_register_at(int addr, int reg, int value);
 
 #ifdef USE_SENSOR
   void set_room_temperature_sensor(sensor::Sensor *s) { this->room_temperature_sensor_ = s; }

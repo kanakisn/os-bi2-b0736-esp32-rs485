@@ -21,12 +21,19 @@ happily hand you a convincing false lead.
 
 ## Silence from the B0736 means "no such register", not "bus fault"
 
-The B0736 never returns a Modbus exception — not once in the 18k-line `capture.log`,
-and not for any unimplemented register in a full 0-255 sweep. It simply does not
-reply. Exactly 40 registers are implemented (list in `CLAUDE.md`).
+For a **read** of an unimplemented register the B0736 does not reply at all - no
+Modbus exception, just silence. Not once in the 18k-line `capture.log`, and not for
+any unimplemented register in a full 0-255 sweep. Exactly 40 registers are
+implemented (list in `CLAUDE.md`).
 
-So a timeout during exploration is a normal, informative answer. Do not go chasing
-the transceiver, the grounding or the framing because a scan came back partly empty.
+So a timeout during read exploration is a normal, informative answer. Do not go
+chasing the transceiver, the grounding or the framing because a scan came back partly
+empty.
+
+**Correction (2026-09-16):** "the B0736 never returns exceptions" was recorded here as
+a blanket rule and that is wrong. An **FC16 write** to regs 0/1/2 returns exception
+**0x04 (slave device failure)**. The rule holds only for reads. A write can and does
+get a real exception back.
 
 ## Absence from capture.log does not mean a register does not exist
 
@@ -134,3 +141,40 @@ back), and do it on a unit nobody is relying on.
 **Reg 117 is writable** - confirmed when it was restored from 65521 back to 65526.
 That settles an open question, even though trimming it was already ruled out because
 the B0736's error is not a constant offset.
+
+## The B0736 will not accept an external ambient temperature. At all.
+
+Exhaustively tested 2026-09-16. Every route fails:
+
+| Route | Result |
+| ----- | ------ |
+| FC06 write to regs 0/1/2, probe fitted | silently rejected, value unchanged at ~150 ms |
+| FC06 write to regs 0/1/2, **probe physically disconnected** | still rejected - stays 0x7FFF |
+| FC16 write to regs 0/1/2 | **exception 0x04** (slave device failure) |
+| FC16 write to reg 231 (known FC06-writable) | silently ignored - FC16 does not write here at all |
+| Broadcast FC06 reg 103 (fan-coil ambient) | no effect, 113 frames |
+| Broadcast triplet 101/102/103 | no effect, 45 frames |
+| Unicast to a fan coil | impossible - see below |
+| Any other writable register carrying 251 (25.1 degC) | none is an ambient input |
+
+**The fan coils are not on the supervisor bus.** An address sweep of 1-31 on A'/B'
+found exactly one responder: address 1, the B0736 itself. The fan coils live behind it
+on the internal A/B bus and cannot be addressed from here at all. That kills the
+unicast route and explains why the broadcasts do nothing.
+
+Removing the probe was worth trying - with no sensor generating reg 0 there is nothing
+to overwrite - and it still refused. Regs 0/1/2 are not "overwritten", they are
+genuinely not writable.
+
+**Consequence:** the only remaining way to make the room reach its target is to
+compensate the *setpoint* (reg 231, which is writable), using the measured error
+`probe - reg0`. That needs reg 0, so the B0736's own probe must stay connected.
+
+## Reg 0 = 0x7FFF (32767) means "no probe", not 3276.7 degC
+
+With the B0736's air probe disconnected, regs 0, 1 and 2 all read 32767 and reg 105
+latches fault **8**. Anything consuming reg 0 must treat 0x7FFF as invalid - publishing
+it as a temperature gives Home Assistant 3276.7 degC.
+
+Reg 105 is a **bitfield**: 8 (bit 3) = air probe missing; the 4 (bit 2) latched by
+write-probing reg 126 is a different fault entirely.

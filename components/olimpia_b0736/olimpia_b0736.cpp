@@ -128,14 +128,30 @@ void OlimpiaB0736::enqueue_(uint8_t fn, uint16_t reg, uint16_t val, uint8_t addr
 // ---------------------------------------------------------------------------
 
 void OlimpiaB0736::send_frame_(const Txn &t) {
-  std::vector<uint8_t> payload = {
-      t.addr != ADDR_USE_CONFIGURED ? t.addr : this->address_,
-      t.fn,
-      static_cast<uint8_t>(t.reg >> 8),
-      static_cast<uint8_t>(t.reg & 0xFF),
-      static_cast<uint8_t>(t.val >> 8),
-      static_cast<uint8_t>(t.val & 0xFF),
-  };
+  const uint8_t addr = t.addr != ADDR_USE_CONFIGURED ? t.addr : this->address_;
+  std::vector<uint8_t> payload;
+  if (t.fn == 0x10) {
+    // FC16 write-multiple, quantity fixed at one register:
+    // addr, fn, reg_hi, reg_lo, qty_hi, qty_lo, bytecount, val_hi, val_lo
+    payload = {addr,
+               t.fn,
+               static_cast<uint8_t>(t.reg >> 8),
+               static_cast<uint8_t>(t.reg & 0xFF),
+               0x00,
+               0x01,
+               0x02,
+               static_cast<uint8_t>(t.val >> 8),
+               static_cast<uint8_t>(t.val & 0xFF)};
+  } else {
+    payload = {
+        addr,
+        t.fn,
+        static_cast<uint8_t>(t.reg >> 8),
+        static_cast<uint8_t>(t.reg & 0xFF),
+        static_cast<uint8_t>(t.val >> 8),
+        static_cast<uint8_t>(t.val & 0xFF),
+    };
+  }
   uint8_t lrc = lrc_(payload);
 
   std::string frame = ":";
@@ -559,6 +575,47 @@ void OlimpiaB0736::write_register_broadcast(int reg, int value) {
   }
   ESP_LOGI(TAG, "BROADCAST write reg %d = %d (0x%04X)", reg, value, value);
   this->enqueue_(0x06, static_cast<uint16_t>(reg), static_cast<uint16_t>(value), ADDR_BROADCAST);
+}
+
+void OlimpiaB0736::write_register_fc16(int reg, int value) {
+  if (reg < 0 || reg > 0xFFFF || value < 0 || value > 0xFFFF) {
+    ESP_LOGW(TAG, "write_register_fc16: out of range");
+    return;
+  }
+  if (reg >= 200) {
+    ESP_LOGW(TAG, "register %d is EEPROM - refusing", reg);
+    return;
+  }
+  ESP_LOGI(TAG, "FC16 write reg %d = %d", reg, value);
+  this->enqueue_(0x10, static_cast<uint16_t>(reg), static_cast<uint16_t>(value));
+  this->manual_reads_.push_back(static_cast<uint16_t>(reg));
+  this->enqueue_(0x03, static_cast<uint16_t>(reg), 1);  // verify with a normal read
+}
+
+void OlimpiaB0736::read_register_at(int addr, int reg) {
+  if (addr < 1 || addr > 247 || reg < 0 || reg > 0xFFFF) {
+    ESP_LOGW(TAG, "read_register_at: addr %d reg %d out of range", addr, reg);
+    return;
+  }
+  ESP_LOGI(TAG, "probe addr %d reg %d", addr, reg);
+  this->manual_reads_.push_back(static_cast<uint16_t>(reg));
+  this->enqueue_(0x03, static_cast<uint16_t>(reg), 1, static_cast<uint8_t>(addr));
+}
+
+void OlimpiaB0736::write_register_at(int addr, int reg, int value) {
+  if (addr < 1 || addr > 247 || reg < 0 || reg > 0xFFFF || value < 0 || value > 0xFFFF) {
+    ESP_LOGW(TAG, "write_register_at: out of range");
+    return;
+  }
+  if (reg >= 200) {
+    ESP_LOGW(TAG, "register %d is EEPROM - refusing", reg);
+    return;
+  }
+  ESP_LOGI(TAG, "addr %d: write reg %d = %d", addr, reg, value);
+  this->enqueue_(0x06, static_cast<uint16_t>(reg), static_cast<uint16_t>(value),
+                 static_cast<uint8_t>(addr));
+  this->manual_reads_.push_back(static_cast<uint16_t>(reg));
+  this->enqueue_(0x03, static_cast<uint16_t>(reg), 1, static_cast<uint8_t>(addr));
 }
 
 void OlimpiaB0736::scan_registers(int start, int count) {

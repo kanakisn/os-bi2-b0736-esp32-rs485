@@ -117,6 +117,30 @@ api:
     #
     # Nothing replies to a broadcast, so nothing can be read back: the only
     # evidence is a change in the fan coil's behaviour.
+    # Talk to a specific slave address instead of the configured one - used to
+    # find whether the fan coils answer on this wire in their own right.
+    - service: write_register_fc16
+      variables:
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoils).write_register_fc16(reg, value);
+
+    - service: read_register_at
+      variables:
+        addr: int
+        reg: int
+      then:
+        - lambda: id(fancoils).read_register_at(addr, reg);
+
+    - service: write_register_at
+      variables:
+        addr: int
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoils).write_register_at(addr, reg, value);
+
     - service: write_register_broadcast
       variables:
         reg: int
