@@ -127,9 +127,19 @@ fitted, and the unit latches an "air probe missing" fault. Supporting evidence:
 (65526 -> 65521) without ever being written - exactly what a sensor-source change
 would do. Unproven, and not worth proving on a live system.
 
+**Confirmed reproducible 2026-09-16 (second occurrence):** writing `reg 126 = 1`
+again, this time with the probe disconnected, added fault bit 2 (8 -> 12) *and* reset
+reg 117 from 65526 to 65521 - the same coupling as the first time. Writing 126 back to
+0 clears neither. So reg 126 = 1 reliably latches a fault and resets the calibration
+offset to what looks like a factory default (-1.5 degC, the value the other two units
+carry). It is not a temperature-source selector in any useful sense.
+
 **If a write-probe sweep is ever run again:** exclude 125 and 126, keep the
 snapshot-and-restore discipline (it worked - everything except the latched fault came
 back), and do it on a unit nobody is relying on.
+
+Registers 127, 128 and 129 - which the first sweep aborted before reaching - were
+probed later and all three accept a write and restore cleanly, with no fault.
 
 ### What the sweep did establish
 
@@ -156,6 +166,9 @@ Exhaustively tested 2026-09-16. Every route fails:
 | Broadcast triplet 101/102/103 | no effect, 45 frames |
 | Unicast to a fan coil | impossible - see below |
 | Any other writable register carrying 251 (25.1 degC) | none is an ambient input |
+| FC06/FC16 to reg 8 (the setpoint x10 mirror) | **exception 0x04** - read-only, so no 0.1 degC setpoint resolution either |
+| Reads of registers 256-319 | nothing answers - the map really does end at 255 |
+| reg 126 = 1 then writing ambient | still refused, and it latches a fault |
 
 **The fan coils are not on the supervisor bus.** An address sweep of 1-31 on A'/B'
 found exactly one responder: address 1, the B0736 itself. The fan coils live behind it
@@ -178,3 +191,15 @@ it as a temperature gives Home Assistant 3276.7 degC.
 
 Reg 105 is a **bitfield**: 8 (bit 3) = air probe missing; the 4 (bit 2) latched by
 write-probing reg 126 is a different fault entirely.
+
+### Still untested, if anyone wants to keep going
+
+- **The >=200 EEPROM block**: 207, 209, 218, 219, 221, 222, 224, 225, 247 were never
+  write-probed, deliberately. A "temperature source" parameter is most plausibly here.
+  The risk is different in kind from the volatile range: these persist across a power
+  cycle, so a bad value cannot be cleared by power-cycling the way a latched fault can.
+  Baseline values for all of them are in the snapshot, so a restore is possible.
+- **FC04 (read input registers)**: every read so far has used FC03. FC04 addresses a
+  separate space in Modbus and might expose registers FC03 does not. Read-only, so it
+  cannot solve the write problem, but it could reveal what else exists.
+- **Reads above 319**: only 256-319 was sampled.
