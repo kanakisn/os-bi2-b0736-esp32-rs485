@@ -80,12 +80,41 @@ write is deferred behind a read (`control_pending_`).
 | Reg | Access | Meaning |
 | --- | --- | --- |
 | 0 | R | Room temperature, ×0.1 °C |
+| 8 | R | Setpoint, ×0.1 °C — plain scaling, unlike 231 |
 | 9 | R | Status bits: b14 EV1, b13 boiler, b12 chiller, b11 EV2 |
 | 105 | R | Fault, 0 = healthy |
+| 113 | R | Unknown. The B1130 polls it every cycle; constant 0 so far |
+| 117 | R | **Signed** temperature offset, ×0.1 °C — per-unit, stored (see below) |
 | 199 | R | Identity constant (1200) — used as the session handshake |
 | 201 | R/W | Control: b0–b2 fan (0 auto, 1 min, 2 night, 3 max), b7 standby |
 | 231 | R/W | Setpoint, `(°C − 15.5) × 2`, clamped to raw 1–25 (16–28 °C) |
 | 233 | R/W | Mode: 3 = heating, 5 = cooling |
+| 245 | R | Minimum setpoint, ×0.1 °C (reads 160) — the clamp above, from the device |
+| 246 | R | Maximum setpoint, ×0.1 °C (reads 280) |
+| 247 | R | Unknown. The B1130 polls it every cycle; constant 0 so far |
+
+Registers 8, 113, 117, 245, 246 and 247 are **not** in `capture.log` in the case of
+117/8/245/246 — the B1130 never reads them, but the B0736 answers them fine. Absence
+from the capture means "the old kit did not ask", not "the register does not exist".
+
+#### Reg 117, and how it was pinned down
+
+Reads `0xFFF1` (−15) on the master and first-floor units and `0xFFF6` (−10) on the
+guest unit — i.e. −1.5 °C and −1.0 °C as a **signed** ×0.1 °C value. It is the only
+register in the whole 105–128 block with the high bit set, so treat that block as
+signed until proven otherwise. Almost certainly the B0736's ambient-sensor
+calibration/correction parameter; confirm against the installer menu before writing.
+
+**The trap:** sampled once, all three units satisfied `ambient − reg117 = 265`
+exactly, which reads as a compelling live deviation term ("Td", the variable regs
+204–213 keep referencing in the community map). It is a coincidence. Two of the
+three units happened to share both ambient and reg 117, so there were only two
+independent points. The invariant broke the moment ambient drifted — reg 117 held at
+−15 while reg 0 fell 250 → 245.
+
+Generalise this: **a single scan cannot distinguish a stored constant from a derived
+value.** Sample over time against reg 0 with `tools/sample.py` before believing any
+relationship. That is what the tool exists for.
 
 ### Exploration services
 
@@ -95,6 +124,13 @@ unknown registers get mapped: results are logged at INFO with a full bit breakdo
 (registers requested by hand are tracked in `manual_reads_`). `write_register`
 refuses register 200 (slave address, in EEPROM). Registers ≥200 generally live in
 EEPROM with limited write endurance — do not loop writes over them.
+
+They are callable from a terminal as well as from HA — see `tools/README.md`. The
+`api:` block carries no encryption key and no password, so `tools/osreg.py` just
+connects to port 6053 and calls the same services; `tools/sample.py` samples a set of
+registers across all three nodes on a cadence. Both need `aioesphomeapi`, which is
+already bundled inside the esphome install (`head -1 $(which esphome)` gives the
+interpreter) — there is nothing to `pip install`.
 
 ## Hardware constraints that bite
 
