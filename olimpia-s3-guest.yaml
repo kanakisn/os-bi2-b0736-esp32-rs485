@@ -290,6 +290,15 @@ climate:
 # an error bigger than (target - 16) cannot be fully corrected. The write only
 # happens when the computed value actually differs, so the bus stays quiet.
 
+globals:
+  # The raw reg-231 value the compensator itself last wrote. Anything else
+  # appearing there means a human moved the climate card, which is adopted as
+  # the new desired room temperature instead of being silently overwritten.
+  - id: last_written_raw
+    type: int
+    restore_value: false
+    initial_value: '-1'
+
 number:
   - platform: template
     name: "Target room temperature"
@@ -319,8 +328,24 @@ interval:
   - interval: 60s
     then:
       - lambda: |-
-          if (!id(compensation_enabled).state)
+          if (!id(compensation_enabled).state) {
+            id(last_written_raw) = -1;   // forget, so re-enabling re-syncs
             return;
+          }
+
+          const int cur_raw =
+              (int) lroundf((id(fancoils).target_temperature - 15.5f) * 2.0f);
+
+          // Two things can write reg 231: this lambda and anyone dragging the
+          // climate card. If what is there is not what we last put there, a
+          // human changed it - adopt that as the new desired ROOM temperature
+          // rather than overwriting their intent on the next tick.
+          if (id(last_written_raw) >= 0 && cur_raw != id(last_written_raw)) {
+            const float adopted = 15.5f + 0.5f * cur_raw;
+            ESP_LOGI("compensator", "climate target moved to %.1f by hand - adopting as target room temperature",
+                     adopted);
+            id(target_room_temp).publish_state(adopted);
+          }
 
           const float probe = id(guest_ble_temperature).state;   // real room
           const float reg0  = id(fancoils).current_temperature;  // what the B0736 believes
@@ -341,8 +366,8 @@ interval:
           if (raw > raw_hi) { raw = raw_hi; clamped = true; }
           const float applied = 15.5f + 0.5f * raw;
 
-          const int cur_raw = (int) lroundf((id(fancoils).target_temperature - 15.5f) * 2.0f);
           if (raw == cur_raw) {
+            id(last_written_raw) = raw;
             ESP_LOGD("compensator", "no change: error %+.2f, setpoint stays %.1f", error, applied);
             return;
           }
@@ -350,4 +375,5 @@ interval:
           ESP_LOGI("compensator",
                    "room %.2f, B0736 %.2f (error %+.2f), want %.1f -> setpoint %.1f%s",
                    probe, reg0, error, want, applied, clamped ? "  [CLAMPED]" : "");
+          id(last_written_raw) = raw;
           id(fancoils).write_register(231, raw);

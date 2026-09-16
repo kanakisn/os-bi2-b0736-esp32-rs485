@@ -39,6 +39,32 @@ deliberately in YAML rather than the component so each step is visible and tunab
 `Corrected setpoint` updates whether or not the switch is on, so the correction can be
 watched before anything is allowed to act on it.
 
+## Two writers on reg 231, and how they are reconciled
+
+**This was a real bug, found immediately in use.** Once compensation is on, two things
+write reg 231: the compensator, and anyone dragging the climate card in Home Assistant.
+The first version silently overwrote the card within 60 s - the user set 22.0, the
+compensator put 23.5 back, and the setting looked like it had been ignored.
+
+The compensator now remembers the raw value it last wrote (`last_written_raw`). If what
+is in reg 231 is not what it put there, a human moved it, and that value is **adopted
+as the new target room temperature** rather than discarded:
+
+```
+climate target moved to 22.0 by hand - adopting as target room temperature
+room 24.86, B0736 24.00 (error +0.86), want 22.0 -> setpoint 21.0
+```
+
+So either control works - the climate card or the number entity - and the climate card
+stays the obvious place to set a temperature, which is where people reach first.
+
+The global resets to -1 when compensation is switched off, so re-enabling re-syncs
+instead of adopting a stale value.
+
+**Expect the climate card's target to differ from what you set.** Set 22 and it will
+settle on 21.0: the card honestly shows the hardware's setpoint, while
+`Target room temperature` shows what you asked for. That is the design, not a bug.
+
 ## Deliberate choices
 
 - **The switch defaults off** (`RESTORE_DEFAULT_OFF`). It writes to the B0736
