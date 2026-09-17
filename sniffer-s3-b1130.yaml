@@ -1,0 +1,163 @@
+# Listen-only RS485 dump for the installation that has NO B0736 thermostat:
+# a B1130 WiFi kit wired straight to a Bi2 fan coil.
+#
+# Purpose: find out exactly how the B1130 drives a fan coil with no thermostat
+# in the path, before replacing it with this board.
+#
+# What capture.log already suggests (from the other installation, where the
+# B1130 sat in front of a B0736): before the B0736 polling begins, the B1130
+# does nothing but BROADCAST writes, on a ~60s timer, never reading anything:
+#
+#     addr=0  W reg=101 = 16384   control word 0x4000 - bit 14 asserts remote
+#     addr=0  W reg=102 = 230     setpoint  23.0 degC  (x0.1)
+#     addr=0  W reg=103 = 241     ambient   24.1 degC  (x0.1)
+#
+# If that is also what happens here, then in THIS installation the fan coil
+# takes its room temperature from whatever the master tells it - which is the
+# one thing the B0736 refuses to do. See
+# .knowledge/decisions/2026-09-16-external-probe-cannot-steer-hardware.md
+#
+# What this capture needs to answer:
+#   1. broadcast only, or does it also unicast to a fan-coil address?
+#   2. the repeat interval - reg 103 reportedly must be rewritten periodically
+#      or the coil reverts, and that interval sets our update_interval
+#   3. does the fan coil ANSWER reads? (if so, status/water temp/fault are
+#      available, and reg 200 gives its address)
+#   4. the control-word bits for fan speed, standby and mode on this unit
+#
+# Change something in the Olimpia app while capturing - setpoint, fan speed,
+# on/off - so the deltas are visible.
+
+esphome:
+  name: olimpia-s3-b1130-sniffer
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  # No USB-UART bridge on this board - the Type-C is native USB.
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # NEW ADDRESS - .121/.122/.124 belong to the three existing boards, and .123
+  # was previously found occupied. .125 was checked free on 2026-09-17: three
+  # pings unanswered and no ARP entry.
+  #
+  # That only proves nothing answers RIGHT NOW. It must also sit OUTSIDE the
+  # router's DHCP pool, or the router will eventually lease it to something
+  # else - confirm the pool's upper bound on the router itself. .123 looked
+  # silent today too, yet was occupied when .124 was chosen.
+  manual_ip:
+    static_ip: 192.168.0.125
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  # First flash is over USB, so this only matters from the second one on.
+  use_address: 192.168.0.125
+  power_save_mode: none
+  reboot_timeout: 15min
+
+api:
+ota:
+  - platform: esphome
+
+# ---- Listen-only UART ----
+# Modbus ASCII per RDE109: 9600 7E1, NOT inverted (inverting makes the idle
+# line read as a stream of 0x00).
+uart:
+  id: bus
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  # Held LOW by the half-duplex driver except while transmitting, and this
+  # build never transmits - so the SP3485EN stays in receive throughout.
+  flow_control_pin: GPIO21
+  baud_rate: 9600
+  data_bits: 7
+  parity: EVEN
+  stop_bits: 1
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      timeout: 20ms
+      bytes: 256
+    sequence:
+      - lambda: |-
+          // Raw hex first - if the framing turns out to be something other
+          // than Modbus ASCII, this is the only record that survives.
+          std::string hex, txt;
+          char b[8];
+          for (auto c : bytes) {
+            sprintf(b, "%02X ", c);
+            hex += b;
+            char m = c & 0x7F;
+            txt += (m >= 32 && m < 127) ? m : '.';
+          }
+          ESP_LOGD("bus", "%8u ms  n=%2u  %s| %s",
+                   (unsigned) millis(), bytes.size(), hex.c_str(), txt.c_str());
+
+          // Then decode. Frames can straddle chunk boundaries, so accumulate
+          // across calls and only act on a complete ':' ... CRLF.
+          static std::string acc;
+          for (auto c : bytes) {
+            char m = c & 0x7F;           // 7E1 - strip the parity bit
+            if (m == ':') { acc.clear(); acc.push_back(m); continue; }
+            if (acc.empty()) continue;   // no frame started yet
+            if (m == '\r') continue;
+            if (m != '\n') {
+              acc.push_back(m);
+              if (acc.size() > 80) acc.clear();   // runaway, resynchronise
+              continue;
+            }
+
+            // complete frame in acc, as ":<hex pairs>"
+            std::string body = acc.substr(1);
+            acc.clear();
+            if (body.size() < 8 || (body.size() % 2) != 0) continue;
+
+            std::vector<uint8_t> f;
+            bool ok = true;
+            for (size_t i = 0; i + 1 < body.size(); i += 2) {
+              char pair[3] = {body[i], body[i + 1], 0};
+              char *end = nullptr;
+              long v = strtol(pair, &end, 16);
+              if (end != pair + 2) { ok = false; break; }
+              f.push_back((uint8_t) v);
+            }
+            if (!ok || f.size() < 4) continue;
+
+            uint8_t sum = 0;
+            for (size_t i = 0; i + 1 < f.size(); i++) sum = (uint8_t) (sum + f[i]);
+            const uint8_t lrc = (uint8_t) (-(int8_t) sum);
+            const bool lrc_ok = (lrc == f.back());
+
+            const uint8_t addr = f[0], fn = f[1];
+            const uint16_t reg = (uint16_t) ((f[2] << 8) | f[3]);
+            const uint16_t val = f.size() >= 6 ? (uint16_t) ((f[4] << 8) | f[5]) : 0;
+            const char *tag = addr == 0 ? "  <<< BROADCAST" : "";
+
+            if (fn & 0x80) {
+              ESP_LOGI("modbus", "addr=%-3u EXCEPTION 0x%02X on reg %u%s", addr, f[2], reg, tag);
+            } else if (fn == 0x03 && f.size() == 7) {
+              ESP_LOGI("modbus", "addr=%-3u READ  reg=%-5u qty=%u%s", addr, reg, val, tag);
+            } else if (fn == 0x03 && f[2] == 0x02) {
+              ESP_LOGI("modbus", "addr=%-3u  -> %u  (0x%04X)", addr,
+                       (unsigned) ((f[3] << 8) | f[4]), (unsigned) ((f[3] << 8) | f[4]));
+            } else if (fn == 0x06) {
+              ESP_LOGI("modbus", "addr=%-3u WRITE reg=%-5u = %-6u (0x%04X)%s",
+                       addr, reg, val, val, tag);
+            } else if (fn == 0x10) {
+              ESP_LOGI("modbus", "addr=%-3u WRITE-MULTI reg=%-5u qty=%u%s", addr, reg, val, tag);
+            } else {
+              ESP_LOGI("modbus", "addr=%-3u fn=0x%02X reg=%u val=%u%s", addr, fn, reg, val, tag);
+            }
+            if (!lrc_ok)
+              ESP_LOGW("modbus", "   ^ LRC mismatch (got 0x%02X, computed 0x%02X)", f.back(), lrc);
+          }
