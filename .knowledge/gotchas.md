@@ -203,3 +203,39 @@ write-probing reg 126 is a different fault entirely.
   separate space in Modbus and might expose registers FC03 does not. Read-only, so it
   cannot solve the write problem, but it could reveal what else exists.
 - **Reads above 319**: only 256-319 was sampled.
+
+## Read-modify-write on a control word: clear BEFORE set, never after
+
+Shipped broken in `olimpia_fancoil` on 2026-09-19 and caught immediately in use -
+"fan mode is not working".
+
+```cpp
+// WRONG - wipes the bits just set
+next = (current | set_mask) & ~clear_mask;
+// RIGHT - as olimpia_b0736 has always had it
+next = (current & ~clear_mask) | set_mask;
+```
+
+A fan-speed change puts **all** of `CTRL_FAN_MASK` (0x0007) in the clear mask and the
+wanted speed in the set mask. With the wrong order the speed is ORed in and then masked
+straight back off, so the fan lands on 0 (auto) every single time.
+
+**Why it looked like only fan was broken:** standby is bit 7, and it is never in both
+masks at once - standby-on puts 0x80 only in the set mask, standby-off only in the
+clear mask. Either order works for it. So on/off behaved perfectly while fan silently
+did nothing, which points the investigation at fan-speed decoding rather than at the
+mask arithmetic shared by both.
+
+`olimpia_b0736` was never affected - the bug was introduced by copying that function
+and reordering it. When porting a component, diff the copied function against the
+original rather than re-deriving it.
+
+## A fan coil will not run the fan if the water is the wrong temperature
+
+Reg 219 on the basement unit reads 200 = **20.0 degC, maximum water temperature while
+cooling** (reg 218 = 300 = minimum 30.0 while heating). With water at 23.0 degC and the
+unit in cooling, reg 16 (actual fan RPM) sits at 0 no matter what fan speed is
+commanded - the coil refuses to blow warm water into the room.
+
+So **reg 16 = 0 is not evidence that a fan command failed.** Check reg 1 (water) against
+regs 218/219 before concluding anything about fan control.

@@ -397,7 +397,12 @@ void OlimpiaFancoil::publish_all_() {
 }
 
 void OlimpiaFancoil::apply_pending_control_(uint16_t current) {
-  uint16_t next = static_cast<uint16_t>((current | this->ctrl_set_mask_) & ~this->ctrl_clear_mask_);
+  // CLEAR FIRST, THEN SET. The other order wipes the bits just set: a fan
+  // change puts all of CTRL_FAN_MASK in the clear mask and the wanted speed in
+  // the set mask, so ORing the speed in and then masking the field off leaves
+  // fan = 0 (auto) every time. Standby is unaffected either way because bit 7
+  // is never in both masks at once, which is why only fan mode appeared broken.
+  uint16_t next = static_cast<uint16_t>((current & ~this->ctrl_clear_mask_) | this->ctrl_set_mask_);
   this->ctrl_set_mask_ = 0;
   this->ctrl_clear_mask_ = 0;
   this->control_pending_ = false;
