@@ -59,6 +59,31 @@ Same register number, same nominal purpose, incompatible encoding. Reusing the B
 encoder here would silently command wildly wrong temperatures. Min/max setpoint also
 move: 202/203 here, 245/246 on the B0736.
 
+## Cross-check against the community map (dumpfheimer, re-pulled 2026-09-19)
+
+Upstream `registers.txt` is byte-identical to the copy taken on 09-16.
+
+| Reg | Community map says | Observed here | Verdict |
+| --- | ------------------ | ------------- | ------- |
+| 0 | ambient (some devices) | 240/241 | confirmed |
+| 202 | minimum setpoint | 150 = 15.0 degC | confirmed |
+| 203 | maximum setpoint | 300 = 30.0 degC | confirmed |
+| 231 | "current setpoint**?**" | written 240 / 210 | confirmed, **and the "?" resolved** |
+| 233 | 3 heat, 5 cool, 7 fan, 0 auto | 5 while cooling | confirmed |
+| **201** | **"???"** | fan bits 0-2, standby bit 7 | **we resolve this** |
+| 224 | "???" | 128, constant | still unknown |
+| 9 | **absent from their list** | 0x4800 | matches TapHome's EV1 bit 14 + EV2 bit 11 |
+| 1, 15, 16 | water temp, fan target, fan actual | B1130 never polls them | **unverified here** |
+
+Two cautions the community file raises that matter:
+
+- **Reg 201 sits in their persistent/EEPROM block**, under "DO NOT PERIODICALLY
+  WRITE THESE REGISTERS". The B1130 writes it on user action only, never on a poll,
+  and `OlimpiaFancoil::apply_pending_control_()` does the same.
+- **Regs 1, 15 and 16 are unverified on this unit.** `water_temperature:` is wired up
+  in the config on the strength of the community map alone; if it reads 0x7FFF or
+  nonsense, remove that block.
+
 ## What the replacement needs
 
 Close to `olimpia_b0736` in shape - a polling request/response client, same wiring and
@@ -68,3 +93,29 @@ standby bit 7) is identical to the B0736's reg 201, so that logic transfers dire
 
 `update_interval` can match the B1130's 2.82 s, or be slower; nothing here suggests a
 watchdog, since the coil holds its state between polls and is only written on demand.
+
+## Built: `olimpia_fancoil`
+
+`components/olimpia_fancoil/` + `olimpia-s3-standalone.yaml` (node
+`olimpia-s3-standalone`, friendly name "Basement FCU 1", 192.168.0.126 - verified
+unanswered and no ARP entry on 09-19, but the DHCP pool bound still needs checking on
+the router).
+
+**Deliberately a separate component, not a flag on `olimpia_b0736`.** The encodings
+differ in ways that fail silently rather than loudly - reg 231 especially - and three
+B0736 units are in production. A shared component with a variant switch would put those
+three at risk of a regression for the sake of avoiding duplication. The duplication is
+the accepted cost; the two files are similar in shape but must not be merged casually.
+
+Differences from the B0736 platform beyond the register map:
+
+- **No IDENT handshake.** `update()` just polls; reg 0 answering is what marks it
+  online. There is no `session_ok_` equivalent because there is no session.
+- **Setpoint step 0.1 degC**, not 0.5 - the coil takes x0.1 directly, so the B0736's
+  quantisation does not apply.
+- **Setpoint limits are read from the device** (regs 202/203, once) rather than
+  hardcoded, and feed `visual_min/max_temperature`.
+- **Supports fan-only and auto modes** (reg 233 values 7 and 0), which the B0736
+  platform does not expose.
+- `REG_STATUS` is last in the poll batch because its handler calls `publish_all_()` -
+  the same constraint as `REG_FAULT` in the B0736 component.
