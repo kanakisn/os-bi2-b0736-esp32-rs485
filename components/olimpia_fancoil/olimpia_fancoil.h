@@ -67,6 +67,12 @@ static const uint16_t STATUS_EV2 = 0x0800;
 static const uint16_t STATUS_CHILLER = 0x1000;
 static const uint16_t STATUS_BOILER = 0x2000;
 static const uint16_t STATUS_EV1 = 0x4000;
+// Inferred 2026-10-08 on the loft coil, not from a document: set while the fan
+// is allowed to run, clear while the coil holds it back - most visibly when
+// the water is on the wrong side of regs 218/219 ("water not ready", the
+// blinking water icon on the coil). Seen as 0xC800 with the fan at 956 rpm and
+// 0x4800 with fan target/actual (regs 15/16) at 0, valves open both times.
+static const uint16_t STATUS_FAN = 0x8000;
 
 // Txn::addr sentinel - "use the configured slave address". 0 stays free as the
 // real Modbus broadcast address.
@@ -97,6 +103,7 @@ class OlimpiaFancoil : public climate::Climate, public uart::UARTDevice, public 
   void set_ev1_binary_sensor(binary_sensor::BinarySensor *s) { this->ev1_binary_sensor_ = s; }
   void set_ev2_binary_sensor(binary_sensor::BinarySensor *s) { this->ev2_binary_sensor_ = s; }
   void set_online_binary_sensor(binary_sensor::BinarySensor *s) { this->online_binary_sensor_ = s; }
+  void set_fan_running_binary_sensor(binary_sensor::BinarySensor *s) { this->fan_running_binary_sensor_ = s; }
 #endif
 
  protected:
@@ -169,6 +176,7 @@ class OlimpiaFancoil : public climate::Climate, public uart::UARTDevice, public 
   binary_sensor::BinarySensor *ev1_binary_sensor_{nullptr};
   binary_sensor::BinarySensor *ev2_binary_sensor_{nullptr};
   binary_sensor::BinarySensor *online_binary_sensor_{nullptr};
+  binary_sensor::BinarySensor *fan_running_binary_sensor_{nullptr};
 #endif
 };
 

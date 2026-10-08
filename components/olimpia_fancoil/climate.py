@@ -20,6 +20,7 @@ CONF_WATER_TEMPERATURE = "water_temperature"
 CONF_EV1 = "ev1"
 CONF_EV2 = "ev2"
 CONF_ONLINE = "online"
+CONF_FAN_RUNNING = "fan_running"
 CONF_REPLY_TIMEOUT = "reply_timeout"
 CONF_MAX_RETRIES = "max_retries"
 
@@ -54,6 +55,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_EV2): binary_sensor.binary_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_FAN_RUNNING): binary_sensor.binary_sensor_schema(
+                icon="mdi:fan",
+            ),
             cv.Optional(CONF_ONLINE): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_CONNECTIVITY,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -85,6 +89,7 @@ async def to_code(config):
     for key, setter in (
         (CONF_EV1, var.set_ev1_binary_sensor),
         (CONF_EV2, var.set_ev2_binary_sensor),
+        (CONF_FAN_RUNNING, var.set_fan_running_binary_sensor),
         (CONF_ONLINE, var.set_online_binary_sensor),
     ):
         if key in config:

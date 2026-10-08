@@ -378,8 +378,16 @@ void OlimpiaFancoil::publish_all_() {
     this->action = climate::CLIMATE_ACTION_COOLING;
   } else if ((this->status_reg_ & STATUS_BOILER) != 0) {
     this->action = climate::CLIMATE_ACTION_HEATING;
+  } else if ((this->status_reg_ & STATUS_FAN) == 0) {
+    // Fan held back. With the valves open this is the coil sampling its
+    // water or refusing it ("water not ready") - not cooling, whatever the
+    // valves say. Reporting COOLING here showed a stopped unit as running.
+    this->action = climate::CLIMATE_ACTION_IDLE;
+  } else if (this->mode == climate::CLIMATE_MODE_FAN_ONLY) {
+    this->action = climate::CLIMATE_ACTION_FAN;
   } else if ((this->status_reg_ & (STATUS_EV1 | STATUS_EV2)) != 0) {
-    // Valves open with no explicit demand bit - the coil is circulating.
+    // Valves open, fan running, no explicit demand bit - the coil is
+    // circulating and blowing.
     this->action = this->mode == climate::CLIMATE_MODE_HEAT ? climate::CLIMATE_ACTION_HEATING
                                                             : climate::CLIMATE_ACTION_COOLING;
   } else {
@@ -391,6 +399,8 @@ void OlimpiaFancoil::publish_all_() {
     this->ev1_binary_sensor_->publish_state((this->status_reg_ & STATUS_EV1) != 0);
   if (this->ev2_binary_sensor_ != nullptr)
     this->ev2_binary_sensor_->publish_state((this->status_reg_ & STATUS_EV2) != 0);
+  if (this->fan_running_binary_sensor_ != nullptr)
+    this->fan_running_binary_sensor_->publish_state((this->status_reg_ & STATUS_FAN) != 0);
 #endif
 
   this->publish_state();
