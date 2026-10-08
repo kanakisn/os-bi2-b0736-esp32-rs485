@@ -239,3 +239,37 @@ commanded - the coil refuses to blow warm water into the room.
 
 So **reg 16 = 0 is not evidence that a fan command failed.** Check reg 1 (water) against
 regs 218/219 before concluding anything about fan control.
+
+## A coil taken from a B0736 is still in remote mode - it ignores direct writes
+
+Hit 2026-10-08 on the loft coil (`olimpia-lcd-loft.yaml`). Reads were perfect, every
+FC06 write was echoed back with no exception - and **none of them stuck**. Reg 231
+stayed at 220 after writing 225, and reg 201 ignored a fan change. Meanwhile the coil
+drifted by itself from Off/Cool to On/Auto/fan Min/22.0 with nobody touching it.
+
+Cause: **reg 224 bit 2 = "remote enabled"** (community map). The loft coil read
+`0x84`, the basement coil `0x80`. In remote mode the coil is driven by a master's
+periodic 101/102/103 writes (the triplet the B1130 broadcasts in `capture.log`), and
+when the master goes quiet it falls back to defaults. Direct writes to 201/231/233
+are acknowledged and then overridden.
+
+Fix: write reg 224 = `0x80`. One EEPROM write; it read back immediately and commands
+from the screen worked from then on (Off, Cool and fan Auto all confirmed by the next
+poll). Write `0x84` back if a B0736 is ever reinstated.
+
+**An echoed write is not an accepted write.** Confirm by reading the register back on
+the next poll before believing a command worked.
+
+**Addendum 2026-10-08 (loft coil): the block is not immediate.** After a power-up or
+a new command, the coil opens its valves and **runs the fan for a while first**,
+presumably to draw water past its probe, and only then holds the fan and blinks the
+water icon. Seen twice with 26.0 degC water against a 20.0 limit: about 5 min after
+Cool was selected, and about 1 min 45 s after a power cycle. So a coil blowing
+warm-water air for the first few minutes is not a failed interlock - wait before
+concluding anything.
+
+**Reg 9 bit 15 shows it** (`STATUS_FAN` in `components/olimpia_fancoil/olimpia_fancoil.h`):
+set while the fan may run (`0xC800`, reg 16 = 678-1414 rpm), clear while it is held
+(`0x4800`, regs 15/16 = 0). Matched on every transition observed. `olimpia_fancoil`
+publishes it as `fan_running:` and reports action IDLE while it is clear; before
+that it showed a held coil as COOLING because the valves were open.

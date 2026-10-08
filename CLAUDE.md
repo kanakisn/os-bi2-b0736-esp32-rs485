@@ -42,6 +42,11 @@ required to actually observe behaviour.
 - `olimpia.yaml` / `olimpia-s3.yaml` — the real configs, one per board: UART, the
   climate platform, and the HA-callable exploration services.
 - `sniffer.yaml` / `sniffer-s3.yaml` — listen-only debug builds (`dummy_receiver: true`).
+- `olimpia-lcd-loft.yaml` — a Waveshare **ESP32-S3-Touch-LCD-4.3B** replacing the loft
+  B0736 outright: `olimpia_fancoil` straight to the coil plus an LVGL touchscreen. A
+  third board with its own pins — RS485 on GPIO43 (RX) / GPIO44 (TX) with automatic
+  direction (no `flow_control_pin`), and GPIO17/18/21 are LCD data lines. PSRAM is
+  required. Setpoint taps are debounced 2 s because reg 231 is in the EEPROM block.
 - `components/olimpia_b0736/` — the external component. `climate.py` is the config
   schema + codegen; `olimpia_b0736.{h,cpp}` is the protocol client and climate entity.
 

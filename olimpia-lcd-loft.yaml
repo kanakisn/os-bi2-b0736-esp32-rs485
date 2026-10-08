@@ -1,0 +1,1216 @@
+# Olimpia Splendid Bi2 fan coil in the loft, driven DIRECTLY by a Waveshare
+# ESP32-S3-Touch-LCD-4.3B that replaces the B0736 wall thermostat.
+#
+# Same protocol and component as olimpia-s3-standalone.yaml (Basement FCU 1):
+# with no B0736 in the path, the fan coil is itself a Modbus ASCII slave at
+# address 1 - see .knowledge/features/b1130-direct-fancoil.md. The touchscreen
+# is a local front end onto the same climate entity Home Assistant sees.
+#
+# VERIFIED 2026-10-08: this coil, which had a B0736 until today, answers
+# plain Modbus ASCII at address 1 once the B0736 is removed - same as the
+# basement coil.
+#
+# REMOTE MODE HAD TO BE TURNED OFF: reg 224 read 0x84 - bit 2 is "remote
+# enabled", left on by the B0736. In remote mode the coil takes orders only
+# from a master's periodic 101/102/103 writes, ignores direct writes to
+# 201/231/233, and falls back to On/Auto/fan Min/22.0 when the master goes
+# quiet. Writing reg 224 = 0x80 (the basement coil's value) fixed it.
+# Write 0x84 back if a B0736 is ever reinstated.
+#
+# A/B POLARITY: the first hookup was totally silent (zero RX bytes, valid
+# requests going out). Swapping A and B fixed it. The 4.3B's terminal labels
+# and the B0736 cable's do not agree - if a new hookup is silent, swap first.
+#
+# This board is NOT the Waveshare ESP32-S3-RS485-CAN. RS485 is on GPIO43/44
+# with automatic direction switching, and GPIO17/18/21 are LCD data lines
+# here. Do not copy a uart: block from the olimpia-s3* configs.
+#
+# The 4.3B has no temperature sensor. Room temperature is the coil's own
+# reg 0. A BLE probe is a later step - the coil may accept an ambient written
+# to regs 101-103 now that we are its master (untested).
+
+esphome:
+  name: olimpia-lcd-loft
+  friendly_name: "Loft FCU"
+  # Activity log and temperature history for the screen's second page.
+  includes:
+    - loft_ui.h
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  # 16 MB flash, 8 MB octal PSRAM. Unlike the other nodes PSRAM is REQUIRED
+  # here - the 800x480 RGB frame buffer lives in it.
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+  # The Type-C port is native USB (GPIO19/20). This is also what keeps the
+  # logger off UART0, whose default pins GPIO43/44 are the RS485 lines.
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # .121/.122/.124 are the B0736 boards, .125 the B1130 sniffer, .126 the
+  # basement coil. .127 did not answer ping and had no ARP entry on 2026-10-08,
+  # but .123 looked that way too and was taken - also confirm it is OUTSIDE
+  # the router's DHCP pool before the first flash.
+  manual_ip:
+    static_ip: 192.168.0.127
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  # Must be where the board is RIGHT NOW. The first flash is over USB.
+  use_address: 192.168.0.127
+  power_save_mode: none
+  reboot_timeout: 15min
+
+api:
+  # Exploration services, callable from Developer Tools -> Actions.
+  services:
+    - service: read_register
+      variables:
+        reg: int
+      then:
+        - lambda: id(fancoil).read_register(reg);
+
+    - service: write_register
+      variables:
+        reg: int
+        value: int
+      then:
+        - lambda: id(fancoil).write_register(reg, value);
+
+    - service: scan_registers
+      variables:
+        start: int
+        count: int
+      then:
+        - lambda: id(fancoil).scan_registers(start, count);
+
+ota:
+  - platform: esphome
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+# ---- Modbus ASCII straight to the fan coil ----
+uart:
+  id: bus
+  tx_pin: GPIO44
+  rx_pin: GPIO43
+  # No flow_control_pin: the 4.3B's transceiver switches direction by itself.
+  # 9600 7E1, NOT inverted, as on every other node.
+  baud_rate: 9600
+  data_bits: 7
+  parity: EVEN
+  stop_bits: 1
+  # Wire-level diagnostics. Uncomment (and set logger level: DEBUG) to
+  # hex-dump every frame. This is what found the A/B swap at bring-up.
+  # debug:
+  #   direction: BOTH
+  #   after:
+  #     timeout: 20ms
+
+climate:
+  - platform: olimpia_fancoil
+    name: "Fan coil"
+    id: fancoil
+    uart_id: bus
+    address: 1
+    reply_timeout: 500ms
+    max_retries: 2
+    update_interval: 5s
+    room_temperature:
+      name: "Room temperature"
+    # Regs 1/15/16 are community-map only. Drop this block if it reads 0x7FFF
+    # or nonsense on this coil.
+    water_temperature:
+      name: "Water temperature"
+      id: water_temp
+    ev1:
+      name: "Valve EV1"
+      id: valve_ev1
+    ev2:
+      name: "Valve EV2"
+      id: valve_ev2
+    # Reg 9 bit 15. Clear while the coil holds its fan back - most often
+    # because the water is not ready (the blinking water icon on the coil).
+    fan_running:
+      name: "Fan running"
+      id: fan_running
+      on_state:
+        - script.execute: refresh_ui
+    online:
+      name: "Fan coil link"
+      id: link_online
+      # Going offline publishes no climate state, so repaint from here too.
+      on_state:
+        - script.execute: refresh_ui
+    # Every state change, whether from the coil, HA or the screen, repaints
+    # the screen from the entity - the screen never keeps its own copy.
+    on_state:
+      - script.execute: refresh_ui
+
+# ---- Display, touch and the IO expander behind both ----
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+  scan: false
+
+ch422g:
+  - id: exio
+
+display:
+  - platform: mipi_rgb
+    id: lcd
+    # ESPHome's preset for the non-B 4.3. Its RGB, DE, sync and PCLK pins match
+    # the 4.3B pin table one for one; reset is EXIO3, backlight EXIO2.
+    model: ESP32-S3-TOUCH-LCD-4.3
+    # Restated from the preset only to add allow_other_uses - the backlight
+    # light below shares this pin.
+    enable_pin:
+      ch422g: exio
+      number: 2
+      allow_other_uses: true
+    update_interval: never
+    auto_clear_enabled: false
+
+touchscreen:
+  - platform: gt911
+    id: touch
+    display: lcd
+    interrupt_pin: GPIO4
+    reset_pin:
+      ch422g: exio
+      number: 1
+    # A tap on a dark screen only wakes it - it must not also press whatever
+    # button happens to be under the finger.
+    on_release:
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - light.turn_on: backlight
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+
+# Backlight is an on/off enable on EXIO2 - no PWM, so no dimming. The display
+# driver also claims this pin to switch it on at boot; this light is only what
+# turns it off when idle.
+output:
+  - platform: gpio
+    id: backlight_out
+    pin:
+      ch422g: exio
+      number: 2
+      allow_other_uses: true
+
+light:
+  - platform: binary
+    id: backlight
+    name: "Backlight"
+    output: backlight_out
+    restore_mode: ALWAYS_ON
+
+
+# ---- Clock ----
+time:
+  - platform: sntp
+    id: athens_time
+    timezone: Europe/Athens
+    on_time_sync:
+      - script.execute: refresh_clock
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: refresh_clock
+
+# ---- Diagnostics for the status page (also exposed to HA) ----
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    name: "WiFi signal"
+    update_interval: 60s
+  - platform: uptime
+    id: uptime_s
+    name: "Uptime"
+    update_interval: 60s
+
+# ---- Fonts ----
+# Inter for the numbers, Material Design Icons for the icons. Glyph sets are
+# kept to what is drawn - every glyph at 112 px costs flash.
+font:
+  - id: font_setpoint
+    file:
+      type: gfonts
+      family: Inter
+      weight: 600
+    size: 112
+    glyphs: "0123456789.-°"
+  - id: font_room
+    file:
+      type: gfonts
+      family: Inter
+      weight: 500
+    size: 40
+    glyphs: "0123456789.-°"
+  - id: font_icons_l
+    file: &mdi
+      type: web
+      url: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf
+    size: 40
+    glyphs:
+      - "\U000F0717"   # snowflake
+      - "\U000F0238"   # fire
+      - "\U000F0210"   # fan
+      - "\U000F0425"   # power
+      - "\U000F171D"   # fan-auto
+      - "\U000F1472"   # fan-speed-1
+      - "\U000F1474"   # fan-speed-3
+      - "\U000F0594"   # weather-night
+      - "\U000F0374"   # minus
+      - "\U000F0415"   # plus
+  - id: font_icons_s
+    file: *mdi
+    size: 26
+    glyphs:
+      - "\U000F0717"   # snowflake
+      - "\U000F0238"   # fire
+      - "\U000F0210"   # fan
+      - "\U000F0425"   # power
+      - "\U000F0F55"   # home-thermometer-outline
+      - "\U000F0319"   # lan-disconnect
+      - "\U000F0393"   # thermostat (idle)
+      - "\U000F1A85"   # water-thermometer (waiting for water)
+
+# ---- Colours ----
+# One accent per mode, used by the dial, the setpoint and the mode tiles, so
+# the whole screen reads as "cooling" or "heating" at a glance.
+#   cool 0x2F9BFF   heat 0xFF7043   fan 0x26C6A6   off 0x6B7480
+#   fault/offline 0xEF5350
+
+# ---- Setpoint edits are debounced ----
+# Reg 231 is in the >=200 EEPROM block. Dragging the dial or tapping + five
+# times must produce one write, not five, so the UI only moves ui_setpoint and
+# the write goes out once the finger has been still for 2 s.
+globals:
+  - id: ui_setpoint
+    type: float
+    initial_value: "NAN"
+  - id: editing_setpoint
+    type: bool
+    initial_value: "false"
+  # Set while refresh_ui moves the dial, so the dial's own on_value does not
+  # mistake a repaint for the user dragging it.
+  - id: painting
+    type: bool
+    initial_value: "false"
+  # millis() of the last command sent from the screen. A change the coil
+  # reports within 15 s of it is tagged "(screen)" in the activity log;
+  # anything else came from HA or from the coil itself.
+  - id: last_local_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: link_since
+    type: std::string
+    initial_value: '""'
+  # On, in cool/heat, valves open, fan held back: the coil is waiting for the
+  # water to reach a usable temperature (regs 218/219). Computed at the top of
+  # refresh_ui; HA sees this only as action "idle".
+  - id: waiting_water
+    type: bool
+    initial_value: "false"
+
+interval:
+  # One history sample every 5 min (72 = 6 h). Setpoint is only charted while
+  # the unit is on - an "off" setpoint is not a target anything is aiming at.
+  - interval: 5min
+    then:
+      - lambda: |-
+          bool on = id(link_online).state && id(fancoil).mode != climate::CLIMATE_MODE_OFF;
+          loft::hist_push(id(link_online).state ? id(fancoil).current_temperature : NAN,
+                          on ? id(fancoil).target_temperature : NAN);
+      - script.execute: refresh_history
+
+script:
+  - id: commit_setpoint
+    mode: restart
+    then:
+      - delay: 2s
+      - lambda: id(last_local_ms) = millis();
+      - climate.control:
+          id: fancoil
+          target_temperature: !lambda return id(ui_setpoint);
+      - lambda: id(editing_setpoint) = false;
+
+  # Shared by the dial and the +/- buttons. `value` is absolute, in degC.
+  - id: set_ui_setpoint
+    parameters:
+      value: float
+    then:
+      - lambda: |-
+          auto t = id(fancoil).get_traits();
+          float v = roundf(value * 2.0f) / 2.0f;
+          v = std::max(t.get_visual_min_temperature(),
+                       std::min(t.get_visual_max_temperature(), v));
+          id(ui_setpoint) = v;
+          id(editing_setpoint) = true;
+      - lvgl.label.update:
+          id: lbl_setpoint
+          text: !lambda return str_sprintf("%.1f°", id(ui_setpoint));
+      - lambda: id(painting) = true;
+      - lvgl.arc.update:
+          id: dial
+          value: !lambda return (int) lroundf(id(ui_setpoint) * 2.0f);
+      - lambda: id(painting) = false;
+      - script.execute: commit_setpoint
+
+  - id: nudge_setpoint
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          float base = id(editing_setpoint) ? id(ui_setpoint)
+                                            : id(fancoil).target_temperature;
+          if (!std::isnan(base)) id(set_ui_setpoint)->execute(base + delta);
+
+  - id: refresh_clock
+    then:
+      - lvgl.label.update:
+          id: lbl_clock
+          text: !lambda |-
+            auto now = id(athens_time).now();
+            return now.is_valid() ? now.strftime("%a %d %b   %H:%M") : std::string("");
+
+  - id: refresh_history
+    then:
+      - lambda: |-
+          loft::hist_draw(id(line_room)->obj, id(line_sp)->obj,
+                          id(lbl_hist_hi), id(lbl_hist_lo), 340, 120);
+
+  - id: refresh_ui
+    then:
+      # -- activity log: diff against what the screen last saw --
+      - lambda: |-
+          using namespace esphome::climate;
+          auto mode_name = [](ClimateMode m) -> const char * {
+            switch (m) {
+              case CLIMATE_MODE_OFF: return "Off";
+              case CLIMATE_MODE_COOL: return "Cool";
+              case CLIMATE_MODE_HEAT: return "Heat";
+              case CLIMATE_MODE_FAN_ONLY: return "Fan only";
+              case CLIMATE_MODE_AUTO: return "Auto";
+              default: return "?";
+            }
+          };
+          auto fan_name = [](ClimateFanMode f) -> const char * {
+            switch (f) {
+              case CLIMATE_FAN_LOW: return "Min";
+              case CLIMATE_FAN_QUIET: return "Night";
+              case CLIMATE_FAN_HIGH: return "Max";
+              default: return "Auto";
+            }
+          };
+          auto action_name = [](ClimateAction a) -> const char * {
+            switch (a) {
+              case CLIMATE_ACTION_COOLING: return "Cooling";
+              case CLIMATE_ACTION_HEATING: return "Heating";
+              case CLIMATE_ACTION_FAN: return "Fan running";
+              case CLIMATE_ACTION_OFF: return "Off";
+              default: return "Idle";
+            }
+          };
+
+          auto now = id(athens_time).now();
+          std::string when = now.is_valid() ? now.strftime("%H:%M")
+                                            : str_sprintf("+%um", (unsigned) (millis() / 60000));
+          bool local = id(last_local_ms) != 0 && millis() - id(last_local_ms) < 15000;
+          std::string src = local ? "  (screen)" : "";
+
+          static bool seen = false, p_online = false;
+          static ClimateMode p_mode;
+          static ClimateFanMode p_fan;
+          static ClimateAction p_action;
+          static float p_sp = NAN;
+          bool changed = false;
+
+          bool online = id(link_online).state;
+          {
+            auto m = id(fancoil)->mode;
+            bool valves = id(valve_ev1)->state || id(valve_ev2)->state;
+            bool w = online && id(fan_running)->has_state() && !id(fan_running)->state && valves &&
+                     (m == CLIMATE_MODE_COOL || m == CLIMATE_MODE_HEAT);
+            static bool p_w = false;
+            if (w != p_w && seen) {
+              loft::log_event(when, w ? str_sprintf("Waiting for water (%.1f°)", id(water_temp)->state)
+                                      : std::string("Water ready"));
+              changed = true;
+            }
+            p_w = w;
+            id(waiting_water) = w;
+          }
+          if (online != p_online) {
+            loft::log_event(when, online ? "Fan coil connected" : "Fan coil offline");
+            id(link_since) = when;
+            p_online = online;
+            changed = true;
+          }
+          auto *c = id(fancoil);
+          if (online && !std::isnan(c->target_temperature)) {
+            ClimateFanMode fan = c->fan_mode.value_or(CLIMATE_FAN_AUTO);
+            if (seen) {
+              if (c->mode != p_mode) {
+                loft::log_event(when, std::string("Mode ") + mode_name(c->mode) + src);
+                changed = true;
+              }
+              if (fan != p_fan) {
+                loft::log_event(when, std::string("Fan ") + fan_name(fan) + src);
+                changed = true;
+              }
+              if (std::isnan(p_sp) || fabsf(c->target_temperature - p_sp) >= 0.05f) {
+                loft::log_event(when, str_sprintf("Setpoint %.1f°", c->target_temperature) + src);
+                changed = true;
+              }
+              if (c->action != p_action) {
+                loft::log_event(when, action_name(c->action));
+                changed = true;
+              }
+            } else {
+              loft::log_event(when, str_sprintf("%s, %.1f°, fan %s", mode_name(c->mode),
+                                                c->target_temperature, fan_name(fan)));
+              changed = true;
+              seen = true;
+            }
+            p_mode = c->mode;
+            p_fan = fan;
+            p_sp = c->target_temperature;
+            p_action = c->action;
+          }
+          if (changed)
+            lv_label_set_text(id(lbl_log), loft::events_text().c_str());
+
+      # -- page 1 --
+      - lvgl.label.update:
+          id: lbl_room
+          text: !lambda |-
+            float t = id(fancoil).current_temperature;
+            return std::isnan(t) ? std::string("--.-°") : str_sprintf("%.1f°", t);
+      - if:
+          condition:
+            lambda: return !id(editing_setpoint) && !std::isnan(id(fancoil).target_temperature);
+          then:
+            - lvgl.label.update:
+                id: lbl_setpoint
+                text: !lambda return str_sprintf("%.1f°", id(fancoil).target_temperature);
+            - lambda: id(painting) = true;
+            - lvgl.arc.update:
+                id: dial
+                value: !lambda return (int) lroundf(id(fancoil).target_temperature * 2.0f);
+            - lambda: id(painting) = false;
+      # Mode accent: dial arc, knob and setpoint number.
+      - lvgl.arc.update:
+          id: dial
+          indicator:
+            arc_color: !lambda |-
+              switch (id(fancoil).mode) {
+                case climate::CLIMATE_MODE_HEAT:     return lv_color_hex(0xFF7043);
+                case climate::CLIMATE_MODE_COOL:     return lv_color_hex(0x2F9BFF);
+                case climate::CLIMATE_MODE_FAN_ONLY: return lv_color_hex(0x26C6A6);
+                default:                             return lv_color_hex(0x6B7480);
+              }
+          knob:
+            bg_color: !lambda |-
+              switch (id(fancoil).mode) {
+                case climate::CLIMATE_MODE_HEAT:     return lv_color_hex(0xFF7043);
+                case climate::CLIMATE_MODE_COOL:     return lv_color_hex(0x2F9BFF);
+                case climate::CLIMATE_MODE_FAN_ONLY: return lv_color_hex(0x26C6A6);
+                default:                             return lv_color_hex(0x6B7480);
+              }
+      - lvgl.label.update:
+          id: lbl_setpoint
+          text_color: !lambda |-
+            return id(fancoil).mode == climate::CLIMATE_MODE_OFF ? lv_color_hex(0x6B7480)
+                                                                  : lv_color_hex(0xF2F4F7);
+      # Status chip: what the coil is actually doing, not what was asked.
+      - lvgl.label.update:
+          id: lbl_status_icon
+          text: !lambda |-
+            using namespace esphome::climate;
+            if (!id(link_online).state) return std::string("\U000F0319");
+            if (id(waiting_water)) return std::string("\U000F1A85");
+            switch (id(fancoil).action) {
+              case CLIMATE_ACTION_COOLING: return std::string("\U000F0717");
+              case CLIMATE_ACTION_HEATING: return std::string("\U000F0238");
+              case CLIMATE_ACTION_FAN:     return std::string("\U000F0210");
+              case CLIMATE_ACTION_OFF:     return std::string("\U000F0425");
+              default:                     return std::string("\U000F0393");
+            }
+          text_color: !lambda |-
+            using namespace esphome::climate;
+            if (!id(link_online).state) return lv_color_hex(0xEF5350);
+            if (id(waiting_water)) return lv_color_hex(0xFFB300);
+            switch (id(fancoil).action) {
+              case CLIMATE_ACTION_COOLING: return lv_color_hex(0x2F9BFF);
+              case CLIMATE_ACTION_HEATING: return lv_color_hex(0xFF7043);
+              case CLIMATE_ACTION_FAN:     return lv_color_hex(0x26C6A6);
+              default:                     return lv_color_hex(0x9AA3AE);
+            }
+      - lvgl.label.update:
+          id: lbl_status
+          text: !lambda |-
+            using namespace esphome::climate;
+            if (!id(link_online).state) return std::string("Fan coil offline");
+            if (id(waiting_water)) return std::string("Waiting for water");
+            switch (id(fancoil).action) {
+              case CLIMATE_ACTION_COOLING: return std::string("Cooling");
+              case CLIMATE_ACTION_HEATING: return std::string("Heating");
+              case CLIMATE_ACTION_FAN:     return std::string("Fan only");
+              case CLIMATE_ACTION_OFF:     return std::string("Off");
+              default:                     return std::string("Idle");
+            }
+      - lvgl.widget.update:
+          id: btn_off
+          state:
+            checked: !lambda return id(fancoil).mode == climate::CLIMATE_MODE_OFF;
+      - lvgl.widget.update:
+          id: btn_cool
+          state:
+            checked: !lambda return id(fancoil).mode == climate::CLIMATE_MODE_COOL;
+      - lvgl.widget.update:
+          id: btn_heat
+          state:
+            checked: !lambda return id(fancoil).mode == climate::CLIMATE_MODE_HEAT;
+      - lvgl.widget.update:
+          id: btn_fanonly
+          state:
+            checked: !lambda return id(fancoil).mode == climate::CLIMATE_MODE_FAN_ONLY;
+      - lvgl.widget.update:
+          id: btn_fan_auto
+          state:
+            checked: !lambda return id(fancoil).fan_mode == climate::CLIMATE_FAN_AUTO;
+      - lvgl.widget.update:
+          id: btn_fan_min
+          state:
+            checked: !lambda return id(fancoil).fan_mode == climate::CLIMATE_FAN_LOW;
+      - lvgl.widget.update:
+          id: btn_fan_night
+          state:
+            checked: !lambda return id(fancoil).fan_mode == climate::CLIMATE_FAN_QUIET;
+      - lvgl.widget.update:
+          id: btn_fan_max
+          state:
+            checked: !lambda return id(fancoil).fan_mode == climate::CLIMATE_FAN_HIGH;
+
+      # -- page 2: status table. Rows line up with lbl_status_keys. --
+      - lvgl.label.update:
+          id: lbl_status_values
+          text: !lambda |-
+            using namespace esphome::climate;
+            auto *c = id(fancoil);
+            bool online = id(link_online).state;
+            auto temp = [](float t) {
+              return std::isnan(t) ? std::string("--") : str_sprintf("%.1f°", t);
+            };
+            std::string link = online ? "Online" : "Offline";
+            if (!id(link_since).empty()) link += " since " + id(link_since);
+
+            std::string mode, fan, action;
+            if (online && !std::isnan(c->target_temperature)) {
+              switch (c->mode) {
+                case CLIMATE_MODE_OFF: mode = "Off"; break;
+                case CLIMATE_MODE_COOL: mode = "Cool"; break;
+                case CLIMATE_MODE_HEAT: mode = "Heat"; break;
+                case CLIMATE_MODE_FAN_ONLY: mode = "Fan only"; break;
+                default: mode = "Auto"; break;
+              }
+              switch (c->fan_mode.value_or(CLIMATE_FAN_AUTO)) {
+                case CLIMATE_FAN_LOW: fan = "Min"; break;
+                case CLIMATE_FAN_QUIET: fan = "Night"; break;
+                case CLIMATE_FAN_HIGH: fan = "Max"; break;
+                default: fan = "Auto"; break;
+              }
+              switch (c->action) {
+                case CLIMATE_ACTION_COOLING: action = "Cooling"; break;
+                case CLIMATE_ACTION_HEATING: action = "Heating"; break;
+                case CLIMATE_ACTION_FAN: action = "Fan running"; break;
+                case CLIMATE_ACTION_OFF: action = "Off"; break;
+                default: action = "Idle"; break;
+              }
+              if (id(waiting_water)) action = "Waiting for water";
+            } else {
+              mode = fan = action = "--";
+            }
+            auto valve = [](binary_sensor::BinarySensor *b) {
+              return !b->has_state() ? std::string("--") : std::string(b->state ? "open" : "shut");
+            };
+            auto t = c->get_traits();
+            float rssi = id(wifi_rssi).state;
+            uint32_t up = std::isnan(id(uptime_s).state) ? 0 : (uint32_t) id(uptime_s).state;
+
+            return link + "\n" +
+                   mode + "\n" +
+                   fan + "\n" +
+                   temp(c->target_temperature) + "\n" +
+                   action + "\n" +
+                   temp(c->current_temperature) + "\n" +
+                   temp(id(water_temp).state) + "\n" +
+                   "EV1 " + valve(id(valve_ev1)) + " · EV2 " + valve(id(valve_ev2)) + "\n" +
+                   str_sprintf("%.1f° – %.1f°", t.get_visual_min_temperature(),
+                               t.get_visual_max_temperature()) + "\n" +
+                   (std::isnan(rssi) ? std::string("--") : str_sprintf("%.0f dBm", rssi)) + "\n" +
+                   str_sprintf("%ud %uh %um", (unsigned) (up / 86400), (unsigned) ((up % 86400) / 3600), (unsigned) ((up % 3600) / 60));
+
+# ---- The screen ----
+# 800x480. A shared header (room, clock, status chip) over a two-tile
+# tileview - swipe left for the second tile:
+#   tile 1   dial (drag the arc or use -/+), mode tiles, fan tiles
+#   tile 2   full status table, 6 h room-temperature chart, activity log
+# Mode/fan tiles are not checkable on their own - a tap only sends a command,
+# and the checked state comes back through refresh_ui once the coil confirms.
+lvgl:
+  displays: lcd
+  touchscreens: touch
+  buffer_size: 25%
+  # The touchscreen on_release above does the waking; left on, LVGL would
+  # also deliver that tap as a click.
+  resume_on_input: false
+  on_idle:
+    timeout: 60s
+    then:
+      - light.turn_off: backlight
+      - lvgl.pause:
+  theme:
+    label:
+      text_color: 0xF2F4F7
+    button:
+      bg_color: 0x1C222B
+      text_color: 0xC9D1DA
+      radius: 18
+      border_width: 0
+      shadow_width: 0
+      pressed:
+        bg_color: 0x2A323D
+      checked:
+        text_color: 0xFFFFFF
+  style_definitions:
+    - id: card
+      bg_color: 0x151A21
+      bg_opa: COVER
+      radius: 24
+      border_width: 0
+      pad_all: 16
+    - id: caption
+      text_font: montserrat_16
+      text_color: 0x7D8794
+      text_letter_space: 2
+    - id: tile
+      pad_all: 6
+      pad_row: 4
+    - id: round_btn
+      radius: 40
+      bg_color: 0x1C222B
+      text_font: font_icons_l
+      text_color: 0xF2F4F7
+    - id: dot_on
+      width: 8
+      height: 8
+      radius: 4
+      border_width: 0
+      bg_color: 0xC9D1DA
+    - id: dot_off
+      width: 8
+      height: 8
+      radius: 4
+      border_width: 0
+      bg_color: 0x3A424D
+    - id: table
+      text_font: montserrat_18
+      text_line_space: 9
+  pages:
+    - id: main_page
+      bg_color: 0x0B0E13
+      bg_opa: COVER
+      scrollable: false
+      widgets:
+        # -- shared header --
+        - label:
+            x: 28
+            y: 20
+            text: "Loft"
+            text_font: montserrat_28
+        - label:
+            id: lbl_clock
+            align: TOP_MID
+            y: 25
+            text: ""
+            text_font: montserrat_20
+            text_color: 0xC9D1DA
+        - obj:
+            align: TOP_RIGHT
+            x: -24
+            y: 16
+            height: 44
+            width: SIZE_CONTENT
+            radius: 22
+            bg_color: 0x151A21
+            border_width: 0
+            pad_left: 14
+            pad_right: 18
+            pad_top: 0
+            pad_bottom: 0
+            scrollable: false
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_cross: CENTER
+              flex_align_track: CENTER
+              pad_column: 8
+            widgets:
+              - label:
+                  id: lbl_status_icon
+                  text: "\U000F0319"
+                  text_font: font_icons_s
+                  text_color: 0xEF5350
+              - label:
+                  id: lbl_status
+                  text: "Waiting for fan coil"
+                  text_font: montserrat_18
+
+        - tileview:
+            id: tiles
+            x: 0
+            y: 72
+            width: 800
+            height: 408
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            tiles:
+              # ================= tile 1: control =================
+              - id: tile_control
+                row: 0
+                column: 0
+                dir: HOR
+                widgets:
+                  - arc:
+                      id: dial
+                      x: 40
+                      y: 8
+                      width: 380
+                      height: 380
+                      # Half-degree units: 30..60 is 15.0..30.0 degC.
+                      # set_ui_setpoint clamps again to the limits the coil
+                      # itself reports.
+                      min_value: 30
+                      max_value: 60
+                      value: 44
+                      rotation: 135
+                      start_angle: 0
+                      end_angle: 270
+                      adjustable: true
+                      arc_width: 22
+                      arc_color: 0x1C222B
+                      arc_rounded: true
+                      indicator:
+                        arc_width: 22
+                        arc_color: 0x6B7480
+                        arc_rounded: true
+                      knob:
+                        bg_color: 0x6B7480
+                        pad_all: 6
+                        border_width: 4
+                        border_color: 0x0B0E13
+                      on_value:
+                        - if:
+                            condition:
+                              lambda: return !id(painting);
+                            then:
+                              - script.execute:
+                                  id: set_ui_setpoint
+                                  value: !lambda return x / 2.0f;
+                  - label:
+                      align_to:
+                        id: dial
+                        align: CENTER
+                        y: -92
+                      text: "SET TO"
+                      styles: caption
+                  - label:
+                      id: lbl_setpoint
+                      align_to:
+                        id: dial
+                        align: CENTER
+                        y: -18
+                      text: "--.-°"
+                      text_font: font_setpoint
+                      text_color: 0x6B7480
+                  - obj:
+                      align_to:
+                        id: dial
+                        align: CENTER
+                        y: 62
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_cross: CENTER
+                        pad_column: 6
+                      widgets:
+                        - label:
+                            text: "\U000F0F55"
+                            text_font: font_icons_s
+                            text_color: 0x7D8794
+                        - label:
+                            id: lbl_room
+                            text: "--.-°"
+                            text_font: font_room
+                            text_color: 0xC9D1DA
+                  - button:
+                      styles: round_btn
+                      align_to:
+                        id: dial
+                        align: CENTER
+                        x: -76
+                        y: 150
+                      width: 80
+                      height: 80
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text: "\U000F0374"
+                      on_click:
+                        - script.execute:
+                            id: nudge_setpoint
+                            delta: -0.5
+                  - button:
+                      styles: round_btn
+                      align_to:
+                        id: dial
+                        align: CENTER
+                        x: 76
+                        y: 150
+                      width: 80
+                      height: 80
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text: "\U000F0415"
+                      on_click:
+                        - script.execute:
+                            id: nudge_setpoint
+                            delta: 0.5
+
+                  # -- mode --
+                  - obj:
+                      styles: card
+                      x: 456
+                      y: 4
+                      width: 320
+                      height: 186
+                      scrollable: false
+                      layout:
+                        type: GRID
+                        grid_columns: [FR(1), FR(1), FR(1), FR(1)]
+                        grid_rows: [CONTENT, FR(1)]
+                        pad_row: 12
+                        pad_column: 10
+                      widgets:
+                        - label:
+                            grid_cell_column_pos: 0
+                            grid_cell_row_pos: 0
+                            grid_cell_column_span: 4
+                            text: "MODE"
+                            styles: caption
+                        - button:
+                            id: btn_cool
+                            styles: tile
+                            layout: &tile_layout { type: FLEX, flex_flow: COLUMN, flex_align_main: CENTER, flex_align_cross: CENTER, flex_align_track: CENTER }
+                            checked: { bg_color: 0x2F9BFF }
+                            grid_cell_column_pos: 0
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F0717", text_font: font_icons_l }
+                              - label: { text: "Cool", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, mode: COOL }
+                        - button:
+                            id: btn_heat
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0xFF7043 }
+                            grid_cell_column_pos: 1
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F0238", text_font: font_icons_l }
+                              - label: { text: "Heat", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, mode: HEAT }
+                        - button:
+                            id: btn_fanonly
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x26C6A6 }
+                            grid_cell_column_pos: 2
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F0210", text_font: font_icons_l }
+                              - label: { text: "Fan", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, mode: FAN_ONLY }
+                        - button:
+                            id: btn_off
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x4A525E }
+                            grid_cell_column_pos: 3
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F0425", text_font: font_icons_l }
+                              - label: { text: "Off", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, mode: "OFF" }
+
+                  # -- fan speed --
+                  - obj:
+                      styles: card
+                      x: 456
+                      y: 204
+                      width: 320
+                      height: 186
+                      scrollable: false
+                      layout:
+                        type: GRID
+                        grid_columns: [FR(1), FR(1), FR(1), FR(1)]
+                        grid_rows: [CONTENT, FR(1)]
+                        pad_row: 12
+                        pad_column: 10
+                      widgets:
+                        - label:
+                            grid_cell_column_pos: 0
+                            grid_cell_row_pos: 0
+                            grid_cell_column_span: 4
+                            text: "FAN"
+                            styles: caption
+                        - button:
+                            id: btn_fan_auto
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x5C6BC0 }
+                            grid_cell_column_pos: 0
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F171D", text_font: font_icons_l }
+                              - label: { text: "Auto", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, fan_mode: AUTO }
+                        - button:
+                            id: btn_fan_night
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x5C6BC0 }
+                            grid_cell_column_pos: 1
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F0594", text_font: font_icons_l }
+                              - label: { text: "Night", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, fan_mode: QUIET }
+                        - button:
+                            id: btn_fan_min
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x5C6BC0 }
+                            grid_cell_column_pos: 2
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F1472", text_font: font_icons_l }
+                              - label: { text: "Min", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, fan_mode: LOW }
+                        - button:
+                            id: btn_fan_max
+                            styles: tile
+                            layout: *tile_layout
+                            checked: { bg_color: 0x5C6BC0 }
+                            grid_cell_column_pos: 3
+                            grid_cell_row_pos: 1
+                            grid_cell_x_align: STRETCH
+                            grid_cell_y_align: STRETCH
+                            widgets:
+                              - label: { text: "\U000F1474", text_font: font_icons_l }
+                              - label: { text: "Max", text_font: montserrat_16 }
+                            on_click:
+                              - lambda: id(last_local_ms) = millis();
+                              - climate.control: { id: fancoil, fan_mode: HIGH }
+
+                  # page dots
+                  - obj: { styles: dot_on, align: BOTTOM_MID, x: -8, y: -6 }
+                  - obj: { styles: dot_off, align: BOTTOM_MID, x: 8, y: -6 }
+
+              # ================= tile 2: status & history =================
+              - id: tile_info
+                row: 0
+                column: 1
+                dir: HOR
+                widgets:
+                  # -- status table --
+                  - obj:
+                      styles: card
+                      x: 24
+                      y: 4
+                      width: 364
+                      height: 386
+                      scrollable: false
+                      widgets:
+                        - label:
+                            text: "STATUS"
+                            styles: caption
+                        - label:
+                            id: lbl_status_keys
+                            styles: table
+                            y: 34
+                            text_color: 0x7D8794
+                            text: "Link\nMode\nFan\nSetpoint\nAction\nRoom\nWater\nValves\nLimits\nWi-Fi\nUptime"
+                        - label:
+                            id: lbl_status_values
+                            styles: table
+                            align: TOP_RIGHT
+                            y: 34
+                            text_align: RIGHT
+                            text: "--"
+
+                  # -- 6 h history --
+                  - obj:
+                      styles: card
+                      x: 404
+                      y: 4
+                      width: 372
+                      height: 186
+                      scrollable: false
+                      widgets:
+                        - label:
+                            text: "LAST 6 HOURS"
+                            styles: caption
+                        - label:
+                            align: TOP_RIGHT
+                            text: "room  ·  setpoint"
+                            text_font: montserrat_14
+                            text_color: 0x7D8794
+                        - obj:
+                            x: 0
+                            y: 30
+                            width: 340
+                            height: 120
+                            bg_opa: TRANSP
+                            border_width: 1
+                            border_side: [TOP, BOTTOM]
+                            border_color: 0x2A323D
+                            pad_all: 0
+                            radius: 0
+                            scrollable: false
+                            widgets:
+                              - line:
+                                  id: line_sp
+                                  points: ["0, 0"]
+                                  line_width: 2
+                                  line_color: 0x6B7480
+                                  line_dash_width: 6
+                                  line_dash_gap: 6
+                              - line:
+                                  id: line_room
+                                  points: ["0, 0"]
+                                  line_width: 3
+                                  line_color: 0x2F9BFF
+                                  line_rounded: true
+                              - label:
+                                  id: lbl_hist_hi
+                                  align: TOP_LEFT
+                                  x: 2
+                                  y: 2
+                                  text: ""
+                                  text_font: montserrat_12
+                                  text_color: 0x7D8794
+                              - label:
+                                  id: lbl_hist_lo
+                                  align: BOTTOM_LEFT
+                                  x: 2
+                                  y: -2
+                                  text: ""
+                                  text_font: montserrat_12
+                                  text_color: 0x7D8794
+                              - label:
+                                  align: CENTER
+                                  id: lbl_hist_empty
+                                  text: ""
+                                  text_font: montserrat_14
+                                  text_color: 0x7D8794
+
+                  # -- activity log --
+                  - obj:
+                      styles: card
+                      x: 404
+                      y: 204
+                      width: 372
+                      height: 186
+                      scrollable: false
+                      widgets:
+                        - label:
+                            text: "ACTIVITY"
+                            styles: caption
+                        - obj:
+                            x: 0
+                            y: 30
+                            width: 340
+                            height: 124
+                            bg_opa: TRANSP
+                            border_width: 0
+                            pad_all: 0
+                            scroll_dir: VER
+                            scrollbar_mode: AUTO
+                            widgets:
+                              - label:
+                                  id: lbl_log
+                                  width: 100%
+                                  text: "Nothing yet"
+                                  text_font: montserrat_16
+                                  text_color: 0xC9D1DA
+                                  text_line_space: 6
+
+                  - obj: { styles: dot_off, align: BOTTOM_MID, x: -8, y: -6 }
+                  - obj: { styles: dot_on, align: BOTTOM_MID, x: 8, y: -6 }
