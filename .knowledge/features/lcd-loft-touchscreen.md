@@ -130,3 +130,7 @@ AUTO speed) with both valves open. Reg 9 = `0xC800` (EV1, EV2, unknown bit 15; c
 demand bit 12 **off**). The basement coil holds its fan at 0 in the same situation.
 Which setting gates the fan on water temperature is unknown - no register in the
 community map describes it. A 200-239 diff against the basement coil is the next step.
+
+**Resolved later the same day:** the fan *was* held, just not immediately - see
+`coil-water-interlock-and-air-sampling.md` for the timing, Olimpia's documented
+behaviour, and the options for gating the coil on water availability.
