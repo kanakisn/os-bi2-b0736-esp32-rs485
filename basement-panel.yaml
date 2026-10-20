@@ -233,17 +233,16 @@ touchscreen:
     reset_pin: GPIO23
     # After the on_boot settle delay above (esphome/esphome#15019).
     setup_priority: -200
-    # A tap on a dark screen only wakes it - it must not also press whatever
-    # is under the finger. A tap on a dimmed screen works normally.
+    # While dark, LVGL is paused and sees no touches at all, so this is what
+    # notices the finger. The wake shield (lvgl top_layer) is still up when
+    # LVGL resumes, so a touch it then replays can't reach a button either.
     on_release:
       - if:
           condition: lvgl.is_paused
           then:
             - lvgl.resume:
             - lvgl.widget.redraw:
-      - light.turn_on:
-          id: backlight
-          brightness: 100%
+            - script.execute: wake_screen
 
 # ---- Fonts ----
 font:
@@ -311,14 +310,28 @@ script:
             # On means lit at all - dimmed by idle counts as on.
             lambda: return id(backlight).current_values.is_on();
           then:
+            - lvgl.widget.show: wake_shield
             - light.turn_off: backlight
             - lvgl.pause:
           else:
             - lvgl.resume:
             - lvgl.widget.redraw:
-            - light.turn_on:
-                id: backlight
-                brightness: 100%
+            - script.execute: wake_screen
+
+  # THE FIRST TOUCH ON A SLEEPING SCREEN ONLY WAKES IT. Dimmed (idle 60 s)
+  # or dark (idle 10 min / BOOT), the screen looks asleep, and a tap there
+  # used to also toggle whatever was under the finger - e.g. the lights.
+  # Every sleep path shows wake_shield, a transparent full-screen object on
+  # LVGL's top layer that swallows the touch; waking lifts it 400 ms later,
+  # after the finger is up.
+  - id: wake_screen
+    mode: restart
+    then:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+      - delay: 400ms
+      - lvgl.widget.hide: wake_shield
 
   - id: refresh_clock
     then:
@@ -449,15 +462,17 @@ lvgl:
   buffer_size: 25%
   resume_on_input: false
   on_idle:
-    # Dim first - it's a wall panel, a lit-but-dim screen is still useful.
+    # Dim first, then dark. Both count as asleep: see wake_screen.
     - timeout: 60s
       then:
+        - lvgl.widget.show: wake_shield
         - light.turn_on:
             id: backlight
             brightness: 15%
     # Then dark, and back to the list.
     - timeout: 10min
       then:
+        - lvgl.widget.show: wake_shield
         - lvgl.page.show: main_page
         - lvgl.tileview.select:
             id: tiles
@@ -481,6 +496,20 @@ lvgl:
       disabled:
         bg_opa: 40%
         text_opa: 40%
+  top_layer:
+    widgets:
+      - obj:
+          id: wake_shield
+          x: 0
+          y: 0
+          width: 720
+          height: 720
+          bg_opa: TRANSP
+          border_width: 0
+          radius: 0
+          hidden: true
+          on_release:
+            - script.execute: wake_screen
   style_definitions:
     - id: caption
       text_font: montserrat_16

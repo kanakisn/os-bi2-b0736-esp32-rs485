@@ -92,3 +92,20 @@ Mode accents are shared with the loft screen: cool `0x2F9BFF`, heat `0xFF7043`, 
 because a switched-off coil must stand out. **Offline is neutral grey `0x6B7480`** - it
 used to be red, which made "off" and "offline" look alike. Defined as
 `panel::COLOR_OFF` / `COLOR_OFFLINE` in `panel_ui.h`.
+
+## The wake tap must not press a button (2026-10-20)
+
+Reported: touching the sleeping screen woke it **and toggled the lights**. My original
+design kept a *dimmed* screen (15% after 60 s idle) fully clickable, on the theory that
+"dim is still usable". In a dark room a 15% screen looks asleep, so the wake tap hit
+the tile underneath. LVGL's `resume_on_input: false` only protects the *paused* (dark)
+state, and even there a touch can be replayed after `lvgl.resume`.
+
+Fix: `wake_shield`, a transparent full-screen `obj` on LVGL's **`top_layer`**, hidden
+while awake. **Every** path into sleep shows it: idle dim, idle dark, BOOT off. It
+catches the first touch, whose `on_release` runs `wake_screen` (backlight 100%, then
+hides the shield 400 ms later, once the finger is up). The touchscreen's own
+`on_release` only resumes LVGL when paused, because a paused LVGL sees no input at all.
+
+Rule for any future screen here: **asleep means "looks asleep", not "is paused"** -
+shield the dimmed state as well as the dark one.
