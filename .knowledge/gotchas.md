@@ -273,3 +273,16 @@ set while the fan may run (`0xC800`, reg 16 = 678-1414 rpm), clear while it is h
 (`0x4800`, regs 15/16 = 0). Matched on every transition observed. `olimpia_fancoil`
 publishes it as `fan_running:` and reports action IDLE while it is clear; before
 that it showed a held coil as COOLING because the valves were open.
+
+## LVGL's built-in Montserrat fonts draw a box for "·", "–" and friends
+
+Hit 2026-10-20 on the basement panel ("Cool · idle" showed a square for the dot) and
+found in three more places on the loft screen. The built-in `montserrat_*` fonts cover
+ASCII, "°" and LVGL's symbols - **not** the middle dot U+00B7, the en dash U+2013,
+bullets or arrows. A missing glyph is drawn as a box, with no compile error or warning.
+
+Rule: text drawn in a `montserrat_*` font is **ASCII plus "°"**. For anything else, use a
+`font:` with explicit `glyphs:` (as the Inter and MDI fonts do), or rephrase. To find
+offenders:
+
+    grep -nP "[\x{00B7}\x{2013}\x{2014}\x{2022}\x{2192}]" *.yaml *.h panel/*.yaml

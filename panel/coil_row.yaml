@@ -1,0 +1,67 @@
+# One row of the fan coil list on the main page. vars: i (index), label, y.
+button:
+  id: c${i}_row
+  x: 24
+  y: ${y}
+  width: 672
+  height: 88
+  radius: 18
+  bg_color: 0x151A21
+  pad_all: 0
+  pressed:
+    bg_color: 0x1F2630
+  widgets:
+    # Mode accent on the left edge.
+    - obj:
+        id: c${i}_bar
+        x: 0
+        y: 0
+        width: 8
+        height: 88
+        radius: 0
+        border_width: 0
+        bg_color: 0x6B7480
+    - label:
+        x: 28
+        y: 13
+        text: "${label}"
+        text_font: montserrat_22
+        text_color: 0xF2F4F7
+    - label:
+        id: c${i}_status
+        x: 28
+        y: 50
+        text: "Waiting for Home Assistant"
+        text_font: montserrat_16
+        text_color: 0x7D8794
+    - label:
+        id: c${i}_cur
+        align: RIGHT_MID
+        x: -64
+        y: -10
+        text: "--.-°"
+        text_font: font_row
+        text_color: 0xF2F4F7
+    - label:
+        id: c${i}_sp
+        align: RIGHT_MID
+        x: -64
+        y: 24
+        text: ""
+        text_font: montserrat_16
+        text_color: 0x7D8794
+    - label:
+        align: RIGHT_MID
+        x: -20
+        text: "\U000F0142"
+        text_font: font_icons_s
+        text_color: 0x4A525E
+  on_click:
+    - lambda: |-
+        id(sel) = ${i};
+        id(editing_setpoint) = false;
+    - script.execute: refresh_detail
+    - lvgl.page.show:
+        id: detail_page
+        animation: MOVE_LEFT
+        time: 200ms

@@ -1,0 +1,62 @@
+# One fan coil as seen through Home Assistant. Included five times from
+# basement-panel.yaml under packages:, with vars i (0-4, the index into
+# panel::coils() in panel_ui.h) and entity (the climate entity id).
+#
+# All internal: these mirror HA state, they must not be published back to HA
+# as new entities.
+text_sensor:
+  - platform: homeassistant
+    id: c${i}_mode
+    entity_id: ${entity}
+    internal: true
+    on_value:
+      - script.execute: refresh_c${i}
+  - platform: homeassistant
+    id: c${i}_action
+    entity_id: ${entity}
+    attribute: hvac_action
+    internal: true
+    on_value:
+      - script.execute: refresh_c${i}
+  - platform: homeassistant
+    id: c${i}_fan
+    entity_id: ${entity}
+    attribute: fan_mode
+    internal: true
+    on_value:
+      - script.execute: refresh_c${i}
+
+sensor:
+  - platform: homeassistant
+    id: c${i}_current
+    entity_id: ${entity}
+    attribute: current_temperature
+    internal: true
+    on_value:
+      - script.execute: refresh_c${i}
+  - platform: homeassistant
+    id: c${i}_target
+    entity_id: ${entity}
+    attribute: temperature
+    internal: true
+    on_value:
+      - script.execute: refresh_c${i}
+
+script:
+  # Repaints this coil's row, and the detail page too if it is showing this
+  # coil.
+  - id: refresh_c${i}
+    then:
+      - lambda: |-
+          const auto &c = panel::coils()[${i}];
+          lv_label_set_text(id(c${i}_status), panel::status_line(c).c_str());
+          lv_label_set_text(id(c${i}_cur), panel::temp(panel::num(c.current)).c_str());
+          std::string sp = (panel::available(c) && panel::text(c.mode) != "off")
+                               ? "set " + panel::temp(panel::num(c.target)) : std::string("");
+          lv_label_set_text(id(c${i}_sp), sp.c_str());
+          lv_obj_set_style_bg_color(id(c${i}_bar), lv_color_hex(panel::accent(c)), LV_PART_MAIN);
+      - if:
+          condition:
+            lambda: return id(sel) == ${i};
+          then:
+            - script.execute: refresh_detail

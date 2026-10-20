@@ -1,0 +1,858 @@
+# Basement wall panel: Waveshare ESP32-P4-86-Panel-ETH-2RO.
+#
+# Two jobs:
+#   1. Relay 1 switches a light (exposed to HA as a light). Relay 2 is wired
+#      up as a plain switch but unused for now.
+#   2. A touchscreen remote for ALL the fan coils, through Home Assistant.
+#   3. A tile for the basement lights (an HA light, light.basement_basement_lights_lights).
+#
+# Unlike every other config in this repo, this node talks to NO fan coil and
+# has no RS485 in use. It reads each coil's climate entity from HA
+# (homeassistant sensors, panel/coil.yaml) and sends commands back as
+# climate.* actions. So:
+#   - the coils' own nodes stay the only Modbus masters - nothing here can
+#     collide with their polling;
+#   - HA must ALLOW this device to perform actions: Settings -> Devices &
+#     services -> ESPHome -> Basement Panel -> Configure -> "Allow the device to
+#     perform Home Assistant actions". Without it every tap is silently dropped.
+#
+# Board facts (Waveshare wiki + esphome/esphome#11775, which used this panel):
+#   ESP32-P4 rev v1.3 on this unit -> engineering_sample: true (pre-rev3 silicon)
+#   32 MB flash (used as 16 MB, see esp32:), 32 MB PSRAM; flash over the "USB to UART" Type-C (WCH bridge),
+#   NOT the USB OTG port.
+#   WiFi via an ESP32-C6 co-processor over SDIO (esp32_hosted).
+#   Display: 720x720 MIPI-DSI (ST7703), ESPHome model WAVESHARE-P4-86-PANEL.
+#   Touch: GT911 on I2C SDA 7 / SCL 8, reset GPIO23.
+#   Backlight: PWM GPIO26 (ACTIVE LOW - inverted), boost enable GPIO33.
+#   Relays: GPIO32 (1), GPIO46 (2).
+
+esphome:
+  name: basement-panel
+  friendly_name: "Basement Panel"
+  includes:
+    - panel_ui.h
+  on_boot:
+    # GT911 needs time to settle after reset before it answers on I2C
+    # (esphome/esphome#15019) - without this it can come up "FAILED".
+    - priority: -150
+      then:
+        - delay: 300ms
+    # Bind the HA mirror sensors into the coil table, once, before anything
+    # repaints from it.
+    - priority: 600
+      then:
+        - lambda: |-
+            auto &c = panel::coils();
+            c[0].mode = id(c0_mode); c[0].action = id(c0_action); c[0].fan = id(c0_fan);
+            c[0].current = id(c0_current); c[0].target = id(c0_target);
+            c[1].mode = id(c1_mode); c[1].action = id(c1_action); c[1].fan = id(c1_fan);
+            c[1].current = id(c1_current); c[1].target = id(c1_target);
+            c[2].mode = id(c2_mode); c[2].action = id(c2_action); c[2].fan = id(c2_fan);
+            c[2].current = id(c2_current); c[2].target = id(c2_target);
+            c[3].mode = id(c3_mode); c[3].action = id(c3_action); c[3].fan = id(c3_fan);
+            c[3].current = id(c3_current); c[3].target = id(c3_target);
+            c[4].mode = id(c4_mode); c[4].action = id(c4_action); c[4].fan = id(c4_fan);
+            c[4].current = id(c4_current); c[4].target = id(c4_target);
+            c[5].mode = id(c5_mode); c[5].action = id(c5_action); c[5].fan = id(c5_fan);
+            c[5].current = id(c5_current); c[5].target = id(c5_target);
+
+esp32:
+  variant: esp32p4
+  # This unit reports chip revision v1.3. Pre-rev3 P4 silicon needs this, and
+  # is limited to 360 MHz.
+  engineering_sample: true
+  cpu_frequency: 360MHz
+  # The chip has 32 MB, but OTA above 16 MB needs ESP-IDF's experimental
+  # features (esphome/esphome#11775). Nothing here needs more than 16 MB.
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  speed: 200MHz
+
+# On-chip LDOs. VO3 at 2.5 V powers the MIPI-DSI PHY (mipi_dsi requires it).
+# VO4 must be 3.3 V for the GPIO domain that GPIO46-48 sit in - relay 2 and
+# the bottom board's RS485, per the Waveshare wiki. The LDO itself tops out at
+# 2.7 V; 3.3 V is its bypass mode, which passes the 3.3 V rail straight through.
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+  - channel: 4
+    voltage: passthrough
+
+logger:
+  level: INFO
+
+# WiFi lives on the ESP32-C6 co-processor, reached over SDIO.
+esp32_hosted:
+  variant: ESP32C6
+  active_high: true
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # .121/.122/.124 B0736 boards, .125 B1130 sniffer, .126 basement coil,
+  # .127 loft. .128 did not answer ping and had no ARP entry on 2026-10-20 -
+  # confirm it is outside the router's DHCP pool.
+  manual_ip:
+    static_ip: 192.168.0.128
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  use_address: 192.168.0.128
+  power_save_mode: none
+  reboot_timeout: 15min
+
+api:
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Athens
+    on_time_sync:
+      - script.execute: refresh_clock
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: refresh_clock
+
+# ---- The six fan coils, mirrored from Home Assistant ----
+# i is the index into panel::coils() (panel_ui.h), which holds the labels and
+# which coils offer fan-only.
+packages:
+  c0: !include { file: panel/coil.yaml, vars: { i: 0, entity: climate.master_bedroom_fcu_fan_coils } }
+  c1: !include { file: panel/coil.yaml, vars: { i: 1, entity: climate.guest_room_fcu_fan_coils } }
+  c2: !include { file: panel/coil.yaml, vars: { i: 2, entity: climate.first_floor_fcu_fan_coils } }
+  c3: !include { file: panel/coil.yaml, vars: { i: 3, entity: climate.loft_fcu_fan_coil } }
+  c4: !include { file: panel/coil.yaml, vars: { i: 4, entity: climate.basement_fcu_1_fan_coil } }
+  c5: !include { file: panel/coil.yaml, vars: { i: 5, entity: climate.olimpia_sniffer_fan_coils } }
+
+# ---- The basement lights, a Home Assistant light ----
+# Mirrored like the coils: the state comes from HA, a tap sends light.toggle.
+text_sensor:
+  - platform: homeassistant
+    id: ha_lights_state
+    entity_id: light.basement_basement_lights_lights
+    internal: true
+    on_value:
+      - script.execute: refresh_ha_lights
+
+# ---- Relays ----
+output:
+  - platform: gpio
+    id: relay1_out
+    pin: GPIO32
+  # ACTIVE LOW. Non-inverted, 100% brightness drove the panel black and 50%
+  # lit it; the screen also flashed on whenever the chip reset, because the
+  # pin floats then.
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO26
+    frequency: 20kHz
+    inverted: true
+
+light:
+  # Relay 1. Not wired yet.
+  - platform: binary
+    id: relay_light
+    name: "Basement Hall lights"
+    output: relay1_out
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - script.execute: refresh_light
+  - platform: monochromatic
+    id: backlight
+    name: "Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+    default_transition_length: 250ms
+
+switch:
+  - platform: gpio
+    id: relay2
+    name: "Relay 2"
+    pin: GPIO46
+    restore_mode: RESTORE_DEFAULT_OFF
+  # Backlight boost converter enable, held HIGH. (Briefly suspected of the
+  # black screen and removed - wrongly; the cause was PWM polarity, below.)
+  - platform: gpio
+    id: backlight_boost
+    pin: GPIO33
+    restore_mode: ALWAYS_ON
+    internal: true
+
+# ---- Display and touch ----
+i2c:
+  sda: GPIO7
+  scl: GPIO8
+
+display:
+  - platform: mipi_dsi
+    id: lcd
+    model: WAVESHARE-P4-86-PANEL
+    update_interval: never
+    auto_clear_enabled: false
+
+touchscreen:
+  - platform: gt911
+    id: touch
+    display: lcd
+    reset_pin: GPIO23
+    # After the on_boot settle delay above (esphome/esphome#15019).
+    setup_priority: -200
+    # A tap on a dark screen only wakes it - it must not also press whatever
+    # is under the finger. A tap on a dimmed screen works normally.
+    on_release:
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+
+# ---- Fonts ----
+font:
+  - id: font_setpoint
+    file: { type: gfonts, family: Inter, weight: 600 }
+    size: 120
+    glyphs: "0123456789.-°"
+  - id: font_row
+    file: { type: gfonts, family: Inter, weight: 500 }
+    size: 36
+    glyphs: "0123456789.-°"
+  - id: font_icons_l
+    file: &mdi
+      type: web
+      url: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf
+    size: 44
+    glyphs:
+      - "\U000F0717"   # snowflake
+      - "\U000F0238"   # fire
+      - "\U000F0210"   # fan
+      - "\U000F0425"   # power
+      - "\U000F171D"   # fan-auto
+      - "\U000F1472"   # fan-speed-1
+      - "\U000F1474"   # fan-speed-3
+      - "\U000F0594"   # weather-night
+      - "\U000F0374"   # minus
+      - "\U000F0415"   # plus
+      - "\U000F0335"   # lightbulb
+      - "\U000F0336"   # lightbulb-outline
+  - id: font_icons_xl
+    file: *mdi
+    size: 80
+    glyphs:
+      - "\U000F0335"   # lightbulb
+      - "\U000F0336"   # lightbulb-outline
+  - id: font_icons_s
+    file: *mdi
+    size: 30
+    glyphs:
+      - "\U000F004D"   # arrow-left
+      - "\U000F0142"   # chevron-right
+      - "\U000F0F55"   # home-thermometer-outline
+
+# ---- Setpoint edits are debounced ----
+# The B0736 units keep their setpoint in EEPROM (reg 231 >= 200), so five taps
+# on + must become one climate.set_temperature, sent 2 s after the last tap.
+globals:
+  - id: sel
+    type: int
+    initial_value: "0"
+  - id: ui_setpoint
+    type: float
+    initial_value: "NAN"
+  - id: editing_setpoint
+    type: bool
+    initial_value: "false"
+
+script:
+  - id: refresh_clock
+    then:
+      - lvgl.label.update:
+          id: lbl_clock
+          text: !lambda |-
+            auto now = id(ha_time).now();
+            return now.is_valid() ? now.strftime("%a %d %b   %H:%M") : std::string("");
+
+  - id: refresh_light
+    then:
+      - lvgl.widget.update:
+          id: btn_light
+          state:
+            checked: !lambda return id(relay_light).current_values.is_on();
+      - lvgl.label.update:
+          id: lbl_light_icon
+          text: !lambda |-
+            return id(relay_light).current_values.is_on() ? std::string("\U000F0335")
+                                                          : std::string("\U000F0336");
+      - lvgl.label.update:
+          id: lbl_light_state
+          text: !lambda |-
+            return id(relay_light).current_values.is_on() ? std::string("On") : std::string("Off");
+
+  - id: refresh_ha_lights
+    then:
+      - lambda: |-
+          std::string st = id(ha_lights_state).state;
+          bool on = st == "on";
+          if (on) lv_obj_add_state(id(btn_ha_lights), LV_STATE_CHECKED);
+          else lv_obj_remove_state(id(btn_ha_lights), LV_STATE_CHECKED);
+          lv_label_set_text(id(lbl_ha_lights_icon), on ? "\U000F0335" : "\U000F0336");
+          const char *txt = on ? "On" : (st == "off" ? "Off" : "Unavailable");
+          lv_label_set_text(id(lbl_ha_lights_state), txt);
+
+  - id: commit_setpoint
+    mode: restart
+    then:
+      - delay: 2s
+      - homeassistant.action:
+          action: climate.set_temperature
+          data:
+            entity_id: !lambda return panel::coils()[id(sel)].entity;
+            temperature: !lambda return str_sprintf("%.1f", id(ui_setpoint));
+      - lambda: id(editing_setpoint) = false;
+
+  - id: nudge_setpoint
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          const auto &c = panel::coils()[id(sel)];
+          float base = id(editing_setpoint) ? id(ui_setpoint) : panel::num(c.target);
+          if (std::isnan(base)) return;
+          // 16-28 covers both coil types: the B0736 clamps to 16-28, the
+          // direct coils to 15-30.
+          id(ui_setpoint) = std::max(16.0f, std::min(28.0f, roundf((base + delta) * 2.0f) / 2.0f));
+          id(editing_setpoint) = true;
+          lv_label_set_text(id(lbl_setpoint), panel::temp(id(ui_setpoint)).c_str());
+      - script.execute: commit_setpoint
+
+  - id: set_mode
+    parameters:
+      mode: std::string
+    then:
+      - homeassistant.action:
+          action: climate.set_hvac_mode
+          data:
+            entity_id: !lambda return panel::coils()[id(sel)].entity;
+            hvac_mode: !lambda return mode;
+
+  - id: set_fan
+    parameters:
+      fan: std::string
+    then:
+      - homeassistant.action:
+          action: climate.set_fan_mode
+          data:
+            entity_id: !lambda return panel::coils()[id(sel)].entity;
+            fan_mode: !lambda return fan;
+
+  # Repaints the detail page from the selected coil. Tiles are never checked by
+  # the tap itself - only by HA reporting the new state back.
+  - id: refresh_detail
+    then:
+      - lambda: |-
+          const auto &c = panel::coils()[id(sel)];
+          std::string m = panel::text(c.mode);
+          std::string f = panel::text(c.fan);
+          bool ok = panel::available(c);
+          uint32_t acc = panel::accent(c);
+
+          lv_label_set_text(id(lbl_title), c.label);
+          lv_label_set_text(id(lbl_detail_status), panel::status_line(c).c_str());
+          lv_obj_set_style_text_color(id(lbl_detail_status), lv_color_hex(acc), LV_PART_MAIN);
+          lv_label_set_text(id(lbl_room), panel::temp(panel::num(c.current)).c_str());
+          if (!id(editing_setpoint))
+            lv_label_set_text(id(lbl_setpoint), panel::temp(panel::num(c.target)).c_str());
+          lv_obj_set_style_text_color(id(lbl_setpoint),
+                                      lv_color_hex(ok && m != "off" ? 0xF2F4F7 : 0x6B7480), LV_PART_MAIN);
+
+          auto check = [](lv_obj_t *o, bool on) {
+            if (on) lv_obj_add_state(o, LV_STATE_CHECKED);
+            else lv_obj_remove_state(o, LV_STATE_CHECKED);
+          };
+          check(id(btn_m_off), m == "off");
+          check(id(btn_m_cool), m == "cool");
+          check(id(btn_m_heat), m == "heat");
+          check(id(btn_m_fan), m == "fan_only");
+          check(id(btn_f_auto), f == "auto");
+          check(id(btn_f_night), f == "quiet");
+          check(id(btn_f_min), f == "low");
+          check(id(btn_f_max), f == "high");
+
+          // The B0736 coils have no fan-only mode - grey the tile out there.
+          if (c.fan_only) lv_obj_remove_state(id(btn_m_fan), LV_STATE_DISABLED);
+          else lv_obj_add_state(id(btn_m_fan), LV_STATE_DISABLED);
+
+# ---- The screens (720 x 720) ----
+#   main_page    header + clock over a tileview: swipe between
+#                  tile 1 lights (HA basement lights, relay 1 hall lights)
+#                  tile 2 one row per fan coil -> tap opens detail_page
+#   detail_page  one coil: setpoint with -/+, mode tiles, fan tiles
+lvgl:
+  displays: lcd
+  touchscreens: touch
+  buffer_size: 25%
+  resume_on_input: false
+  on_idle:
+    # Dim first - it's a wall panel, a lit-but-dim screen is still useful.
+    - timeout: 60s
+      then:
+        - light.turn_on:
+            id: backlight
+            brightness: 15%
+    # Then dark, and back to the list.
+    - timeout: 10min
+      then:
+        - lvgl.page.show: main_page
+        - lvgl.tileview.select:
+            id: tiles
+            tile_id: tile_lights
+            animated: false
+        - light.turn_off: backlight
+        - lvgl.pause:
+  theme:
+    label:
+      text_color: 0xF2F4F7
+    button:
+      bg_color: 0x1C222B
+      text_color: 0xC9D1DA
+      radius: 18
+      border_width: 0
+      shadow_width: 0
+      pressed:
+        bg_color: 0x2A323D
+      checked:
+        text_color: 0xFFFFFF
+      disabled:
+        bg_opa: 40%
+        text_opa: 40%
+  style_definitions:
+    - id: caption
+      text_font: montserrat_16
+      text_color: 0x7D8794
+      text_letter_space: 2
+    - id: tile
+      pad_all: 6
+      pad_row: 4
+    - id: dot_on
+      width: 10
+      height: 10
+      radius: 5
+      border_width: 0
+      bg_color: 0xC9D1DA
+    - id: dot_off
+      width: 10
+      height: 10
+      radius: 5
+      border_width: 0
+      bg_color: 0x3A424D
+    - id: round_btn
+      radius: 70
+      bg_color: 0x1C222B
+      text_font: font_icons_l
+      text_color: 0xF2F4F7
+  pages:
+    # ======================= main =======================
+    - id: main_page
+      bg_color: 0x0B0E13
+      bg_opa: COVER
+      scrollable: false
+      widgets:
+        - label:
+            x: 24
+            y: 22
+            text: "Basement"
+            text_font: montserrat_28
+        - label:
+            id: lbl_clock
+            align: TOP_RIGHT
+            x: -24
+            y: 28
+            text: ""
+            text_font: montserrat_20
+            text_color: 0xC9D1DA
+
+        # Swipe left/right between the two tiles. The header above stays put.
+        - tileview:
+            id: tiles
+            x: 0
+            y: 72
+            width: 720
+            height: 648
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            tiles:
+              # ================= tile 1: lights =================
+              - id: tile_lights
+                row: 0
+                column: 0
+                dir: HOR
+                widgets:
+                  - label:
+                      x: 28
+                      y: 8
+                      text: "LIGHTS"
+                      styles: caption
+                  - button:
+                      id: btn_ha_lights
+                      x: 24
+                      y: 40
+                      width: 672
+                      height: 240
+                      radius: 28
+                      bg_color: 0x151A21
+                      checked:
+                        bg_color: 0xF2B233
+                        text_color: 0x0B0E13
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data:
+                              entity_id: light.basement_basement_lights_lights
+                      widgets:
+                        - label:
+                            id: lbl_ha_lights_icon
+                            align: LEFT_MID
+                            x: 40
+                            text: "\U000F0336"
+                            text_font: font_icons_xl
+                        - label:
+                            align: LEFT_MID
+                            x: 150
+                            y: -22
+                            text: "Basement lights"
+                            text_font: montserrat_32
+                        - label:
+                            id: lbl_ha_lights_state
+                            align: LEFT_MID
+                            x: 150
+                            y: 26
+                            text: "Waiting for Home Assistant"
+                            text_font: montserrat_22
+                  - button:
+                      id: btn_light
+                      x: 24
+                      y: 300
+                      width: 672
+                      height: 240
+                      radius: 28
+                      bg_color: 0x151A21
+                      checked:
+                        bg_color: 0xF2B233
+                        text_color: 0x0B0E13
+                      on_click:
+                        - light.toggle: relay_light
+                      widgets:
+                        - label:
+                            id: lbl_light_icon
+                            align: LEFT_MID
+                            x: 40
+                            text: "\U000F0336"
+                            text_font: font_icons_xl
+                        - label:
+                            align: LEFT_MID
+                            x: 150
+                            y: -22
+                            text: "Basement Hall lights"
+                            text_font: montserrat_32
+                        - label:
+                            id: lbl_light_state
+                            align: LEFT_MID
+                            x: 150
+                            y: 26
+                            text: "Off"
+                            text_font: montserrat_22
+
+                  - obj: { styles: dot_on, align: BOTTOM_MID, x: -10, y: -14 }
+                  - obj: { styles: dot_off, align: BOTTOM_MID, x: 10, y: -14 }
+
+              # ================= tile 2: fan coils =================
+              - id: tile_coils
+                row: 0
+                column: 1
+                dir: HOR
+                widgets:
+                  - label:
+                      x: 28
+                      y: 8
+                      text: "FAN COILS"
+                      styles: caption
+                  - !include { file: panel/coil_row.yaml, vars: { i: 5, label: "Living room", y: 36 } }
+                  - !include { file: panel/coil_row.yaml, vars: { i: 0, label: "Master bedroom", y: 132 } }
+                  - !include { file: panel/coil_row.yaml, vars: { i: 1, label: "Guest room", y: 228 } }
+                  - !include { file: panel/coil_row.yaml, vars: { i: 2, label: "First floor", y: 324 } }
+                  - !include { file: panel/coil_row.yaml, vars: { i: 3, label: "Loft", y: 420 } }
+                  - !include { file: panel/coil_row.yaml, vars: { i: 4, label: "Basement", y: 516 } }
+                  - obj: { styles: dot_off, align: BOTTOM_MID, x: -10, y: -14 }
+                  - obj: { styles: dot_on, align: BOTTOM_MID, x: 10, y: -14 }
+
+    # ======================= one coil =======================
+    - id: detail_page
+      bg_color: 0x0B0E13
+      bg_opa: COVER
+      scrollable: false
+      widgets:
+        - button:
+            x: 16
+            y: 16
+            width: 72
+            height: 60
+            radius: 16
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "\U000F004D"
+                  text_font: font_icons_s
+            on_click:
+              - lvgl.page.show:
+                  id: main_page
+                  animation: MOVE_RIGHT
+                  time: 200ms
+        - label:
+            id: lbl_title
+            x: 104
+            y: 22
+            text: ""
+            text_font: montserrat_28
+        - label:
+            id: lbl_detail_status
+            x: 104
+            y: 58
+            text: ""
+            text_font: montserrat_16
+
+        # -- room temperature, top right. Icon and number share one flex row so
+        #    a wide reading ("25.3°") pushes the icon left instead of under it.
+        - obj:
+            align: TOP_RIGHT
+            x: -24
+            y: 24
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_cross: CENTER
+              pad_column: 8
+            widgets:
+              - label:
+                  text: "\U000F0F55"
+                  text_font: font_icons_s
+                  text_color: 0x7D8794
+              - label:
+                  id: lbl_room
+                  text: "--.-°"
+                  text_font: montserrat_28
+                  text_color: 0xC9D1DA
+
+        # -- setpoint --
+        - label:
+            align: TOP_MID
+            y: 120
+            text: "SET TO"
+            styles: caption
+        - label:
+            id: lbl_setpoint
+            align: TOP_MID
+            y: 150
+            text: "--.-°"
+            text_font: font_setpoint
+        - button:
+            styles: round_btn
+            x: 40
+            y: 156
+            width: 120
+            height: 120
+            widgets:
+              - label: { align: CENTER, text: "\U000F0374" }
+            on_click:
+              - script.execute: { id: nudge_setpoint, delta: -0.5 }
+        - button:
+            styles: round_btn
+            align: TOP_RIGHT
+            x: -40
+            y: 156
+            width: 120
+            height: 120
+            widgets:
+              - label: { align: CENTER, text: "\U000F0415" }
+            on_click:
+              - script.execute: { id: nudge_setpoint, delta: 0.5 }
+
+        # -- mode --
+        - label:
+            x: 28
+            y: 316
+            text: "MODE"
+            styles: caption
+        - obj:
+            x: 24
+            y: 344
+            width: 672
+            height: 150
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            layout:
+              type: GRID
+              grid_columns: [FR(1), FR(1), FR(1), FR(1)]
+              grid_rows: [FR(1)]
+              pad_column: 12
+            widgets:
+              - button:
+                  id: btn_m_cool
+                  styles: tile
+                  layout: &tile_layout { type: FLEX, flex_flow: COLUMN, flex_align_main: CENTER, flex_align_cross: CENTER, flex_align_track: CENTER }
+                  checked: { bg_color: 0x2F9BFF }
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F0717", text_font: font_icons_l }
+                    - label: { text: "Cool", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_mode, mode: "cool" }
+              - button:
+                  id: btn_m_heat
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0xFF7043 }
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F0238", text_font: font_icons_l }
+                    - label: { text: "Heat", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_mode, mode: "heat" }
+              - button:
+                  id: btn_m_fan
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0x26C6A6 }
+                  grid_cell_column_pos: 2
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F0210", text_font: font_icons_l }
+                    - label: { text: "Fan", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_mode, mode: "fan_only" }
+              - button:
+                  id: btn_m_off
+                  styles: tile
+                  layout: *tile_layout
+                  # Red, matching panel::COLOR_OFF - Off must be unmistakable.
+                  checked: { bg_color: 0xE53935 }
+                  grid_cell_column_pos: 3
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F0425", text_font: font_icons_l }
+                    - label: { text: "Off", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_mode, mode: "off" }
+
+        # -- fan speed --
+        - label:
+            x: 28
+            y: 516
+            text: "FAN"
+            styles: caption
+        - obj:
+            x: 24
+            y: 544
+            width: 672
+            height: 150
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            layout:
+              type: GRID
+              grid_columns: [FR(1), FR(1), FR(1), FR(1)]
+              grid_rows: [FR(1)]
+              pad_column: 12
+            widgets:
+              - button:
+                  id: btn_f_auto
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0x5C6BC0 }
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F171D", text_font: font_icons_l }
+                    - label: { text: "Auto", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_fan, fan: "auto" }
+              - button:
+                  id: btn_f_night
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0x5C6BC0 }
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F0594", text_font: font_icons_l }
+                    - label: { text: "Night", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_fan, fan: "quiet" }
+              - button:
+                  id: btn_f_min
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0x5C6BC0 }
+                  grid_cell_column_pos: 2
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F1472", text_font: font_icons_l }
+                    - label: { text: "Min", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_fan, fan: "low" }
+              - button:
+                  id: btn_f_max
+                  styles: tile
+                  layout: *tile_layout
+                  checked: { bg_color: 0x5C6BC0 }
+                  grid_cell_column_pos: 3
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label: { text: "\U000F1474", text_font: font_icons_l }
+                    - label: { text: "Max", text_font: montserrat_20 }
+                  on_click:
+                    - script.execute: { id: set_fan, fan: "high" }
