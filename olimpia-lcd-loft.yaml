@@ -663,8 +663,8 @@ script:
                    action + "\n" +
                    temp(c->current_temperature) + "\n" +
                    temp(id(water_temp).state) + "\n" +
-                   "EV1 " + valve(id(valve_ev1)) + " · EV2 " + valve(id(valve_ev2)) + "\n" +
-                   str_sprintf("%.1f° – %.1f°", t.get_visual_min_temperature(),
+                   "EV1 " + valve(id(valve_ev1)) + ", EV2 " + valve(id(valve_ev2)) + "\n" +
+                   str_sprintf("%.1f° - %.1f°", t.get_visual_min_temperature(),
                                t.get_visual_max_temperature()) + "\n" +
                    (std::isnan(rssi) ? std::string("--") : str_sprintf("%.0f dBm", rssi)) + "\n" +
                    str_sprintf("%ud %uh %um", (unsigned) (up / 86400), (unsigned) ((up % 86400) / 3600), (unsigned) ((up % 3600) / 60));
@@ -985,7 +985,8 @@ lvgl:
                             id: btn_off
                             styles: tile
                             layout: *tile_layout
-                            checked: { bg_color: 0x4A525E }
+                            # Red, as on the basement panel - Off must be unmistakable.
+                            checked: { bg_color: 0xE53935 }
                             grid_cell_column_pos: 3
                             grid_cell_row_pos: 1
                             grid_cell_x_align: STRETCH
@@ -1129,7 +1130,7 @@ lvgl:
                             styles: caption
                         - label:
                             align: TOP_RIGHT
-                            text: "room  ·  setpoint"
+                            text: "room / setpoint"
                             text_font: montserrat_14
                             text_color: 0x7D8794
                         - obj:
