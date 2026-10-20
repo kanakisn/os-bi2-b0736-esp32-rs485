@@ -3,8 +3,8 @@
 **Status:** flashed and booting 2026-10-20 (WiFi up, touch responding). HA adoption,
 the fan-coil rows and the relay click are **not yet confirmed**.
 **Layout (2026-10-20):** header (title, clock) over a two-tile `tileview` - swipe
-between **lights** (HA `light.basement_basement_lights_lights` + relay 1 "Basement Hall
-lights") and **fan coils** (six rows: living room, master, guest, first floor, loft,
+between **lights** (two tall tiles side by side: HA `light.basement_basement_lights_lights`
+and relay 1 "Basement Hall lights") and **fan coils** (six rows: living room, master, guest, first floor, loft,
 basement). Tapping a row opens `detail_page`. After 10 min idle it returns to the lights
 tile and goes dark. The living room coil is `climate.olimpia_sniffer_fan_coils` - the
 T-CAN485 node from `olimpia.yaml`, still named `olimpia-sniffer`.
@@ -56,7 +56,8 @@ The single detail page serves whichever coil is selected (`sel`) through
 | Display | `mipi_dsi` model `WAVESHARE-P4-86-PANEL` (built into ESPHome 2026.7). |
 | Touch | GT911, I2C SDA 7 / SCL 8, reset GPIO23. On-boot 300 ms delay + `setup_priority: -200` per esphome/esphome#15019 (settle-after-reset bug). |
 | Backlight | PWM GPIO26 (ledc) is **active low** -> `inverted: true`. Boost enable GPIO33 held HIGH (correct - it was briefly suspected and removed, wrongly). |
-| Relays | GPIO32 (relay 1 -> `light` "Light"), GPIO46 (relay 2 -> `switch` "Relay 2"). |
+| Relays | GPIO32 (relay 1 -> `light` "Basement Hall lights"), GPIO46 (relay 2 -> `switch` "Relay 2"). |
+| BOOT button | **GPIO35**, active low (`boot_button`, toggles the screen via `toggle_screen`). Espressif's P4 convention - the wiki doesn't name it, and lists GPIO35 as Ethernet TXD1 (unused, we're on WiFi). **Confirmed 2026-10-20**: presses logged and the screen toggled. Read only at runtime, so holding it at power-on still enters download mode. |
 | Power | DC 6-30 V. |
 
 The board also has RS485 (RX GPIO48, TX GPIO47), so it could drive a fan coil directly

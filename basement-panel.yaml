@@ -178,6 +178,28 @@ light:
     restore_mode: ALWAYS_ON
     default_transition_length: 250ms
 
+# ---- BOOT button: screen on/off ----
+# BOOT is the P4's boot-mode strapping pin, GPIO35 - Espressif's convention;
+# the Waveshare wiki doesn't name it, and lists GPIO35 as Ethernet TXD1 (unused
+# here, we're on WiFi). Active low, pulled up on the board. Only read once
+# running, so holding it at power-on still enters download mode as before.
+binary_sensor:
+  - platform: gpio
+    id: boot_button
+    name: "BOOT button"
+    pin:
+      number: GPIO35
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+      ignore_strapping_warning: true
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - logger.log: "BOOT pressed - toggling screen"
+      - script.execute: toggle_screen
+
 switch:
   - platform: gpio
     id: relay2
@@ -280,6 +302,24 @@ globals:
     initial_value: "false"
 
 script:
+  # BOOT button. Off = backlight off and LVGL paused, exactly like the 10-min
+  # idle state, so a tap on the glass also wakes it. On = full brightness.
+  - id: toggle_screen
+    then:
+      - if:
+          condition:
+            # On means lit at all - dimmed by idle counts as on.
+            lambda: return id(backlight).current_values.is_on();
+          then:
+            - light.turn_off: backlight
+            - lvgl.pause:
+          else:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+            - light.turn_on:
+                id: backlight
+                brightness: 100%
+
   - id: refresh_clock
     then:
       - lvgl.label.update:
@@ -500,6 +540,7 @@ lvgl:
             scrollbar_mode: "OFF"
             tiles:
               # ================= tile 1: lights =================
+              # Two tall tiles side by side - the whole tile is the switch.
               - id: tile_lights
                 row: 0
                 column: 0
@@ -513,14 +554,21 @@ lvgl:
                   - button:
                       id: btn_ha_lights
                       x: 24
-                      y: 40
-                      width: 672
-                      height: 240
-                      radius: 28
+                      y: 44
+                      width: 324
+                      height: 540
+                      radius: 32
                       bg_color: 0x151A21
                       checked:
                         bg_color: 0xF2B233
                         text_color: 0x0B0E13
+                      layout:
+                        type: FLEX
+                        flex_flow: COLUMN
+                        flex_align_main: CENTER
+                        flex_align_cross: CENTER
+                        flex_align_track: CENTER
+                        pad_row: 18
                       on_click:
                         - homeassistant.action:
                             action: light.toggle
@@ -529,57 +577,53 @@ lvgl:
                       widgets:
                         - label:
                             id: lbl_ha_lights_icon
-                            align: LEFT_MID
-                            x: 40
                             text: "\U000F0336"
                             text_font: font_icons_xl
                         - label:
-                            align: LEFT_MID
-                            x: 150
-                            y: -22
+                            width: 280
+                            long_mode: WRAP
+                            text_align: CENTER
                             text: "Basement lights"
-                            text_font: montserrat_32
+                            text_font: montserrat_28
                         - label:
                             id: lbl_ha_lights_state
-                            align: LEFT_MID
-                            x: 150
-                            y: 26
-                            text: "Waiting for Home Assistant"
+                            text: "Waiting for HA"
                             text_font: montserrat_22
                   - button:
                       id: btn_light
-                      x: 24
-                      y: 300
-                      width: 672
-                      height: 240
-                      radius: 28
+                      x: 372
+                      y: 44
+                      width: 324
+                      height: 540
+                      radius: 32
                       bg_color: 0x151A21
                       checked:
                         bg_color: 0xF2B233
                         text_color: 0x0B0E13
+                      layout:
+                        type: FLEX
+                        flex_flow: COLUMN
+                        flex_align_main: CENTER
+                        flex_align_cross: CENTER
+                        flex_align_track: CENTER
+                        pad_row: 18
                       on_click:
                         - light.toggle: relay_light
                       widgets:
                         - label:
                             id: lbl_light_icon
-                            align: LEFT_MID
-                            x: 40
                             text: "\U000F0336"
                             text_font: font_icons_xl
                         - label:
-                            align: LEFT_MID
-                            x: 150
-                            y: -22
+                            width: 280
+                            long_mode: WRAP
+                            text_align: CENTER
                             text: "Basement Hall lights"
-                            text_font: montserrat_32
+                            text_font: montserrat_28
                         - label:
                             id: lbl_light_state
-                            align: LEFT_MID
-                            x: 150
-                            y: 26
                             text: "Off"
                             text_font: montserrat_22
-
                   - obj: { styles: dot_on, align: BOTTOM_MID, x: -10, y: -14 }
                   - obj: { styles: dot_off, align: BOTTOM_MID, x: 10, y: -14 }
 
